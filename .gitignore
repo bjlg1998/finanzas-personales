@@ -1,0 +1,14 @@
+node_modules/
+.expo/
+dist/
+*.jks
+*.keystore
+*.p8
+*.p12
+*.mobileprovision
+*.orig.*
+web-build/
+android/.kotlin/
+
+# Los instaladores se publican en GitHub Releases, no en el historial del código.
+*.apk
