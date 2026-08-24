@@ -169,16 +169,26 @@ function MoneyField({ label, value, onChange, placeholder = '0' }) {
 function Sheet({ visible, onClose, title, children }) {
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.overlay} onPress={onClose}>
-        <Pressable style={styles.sheet} onPress={() => {}}>
-          <View style={styles.handle} />
-          <View style={styles.sheetTop}>
-            <Text style={styles.sheetTitle}>{title}</Text>
-            <Pressable onPress={onClose}><Icon name="close" size={24} color={COLORS.text} /></Pressable>
-          </View>
-          {children}
+      <SafeAreaView style={styles.sheetSafeArea} edges={['top']}>
+        <Pressable style={styles.overlay} onPress={onClose}>
+          <Pressable style={styles.sheet} onPress={() => {}}>
+            <View style={styles.handle} />
+            <View style={styles.sheetTop}>
+              <Text style={styles.sheetTitle}>{title}</Text>
+              <Pressable onPress={onClose}><Icon name="close" size={24} color={COLORS.text} /></Pressable>
+            </View>
+            <ScrollView
+              style={styles.sheetScroll}
+              contentContainerStyle={styles.sheetContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+            >
+              {children}
+            </ScrollView>
+          </Pressable>
         </Pressable>
-      </Pressable>
+      </SafeAreaView>
     </Modal>
   );
 }
@@ -198,7 +208,9 @@ function AppContent() {
   const [selectedExpense, setSelectedExpense] = useState(null);
   const [paymentUrl, setPaymentUrl] = useState('');
   const [paymentReference, setPaymentReference] = useState('');
+  const [referenceCopied, setReferenceCopied] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
   const [category, setCategory] = useState('Comida');
   const cycle = cycleFor(new Date(), data.activeCycleStart);
   const activeTheme = THEMES[data.theme] || THEMES.menta;
@@ -459,7 +471,8 @@ function AppContent() {
 
   const copyPaymentReference = async (reference) => {
     await Clipboard.setStringAsync(reference);
-    Alert.alert('Referencia copiada', 'Ya puedes pegarla en la página o aplicación de pago.');
+    setReferenceCopied(true);
+    setTimeout(() => setReferenceCopied(false), 1600);
   };
 
   const deleteFixed = () => {
@@ -683,10 +696,6 @@ function AppContent() {
   const renderHistory = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <Header title="Historial" subtitle="TU PROGRESO" />
-      <View style={styles.insight}>
-        <Icon name="trending-up" size={24} color={COLORS.mint} />
-        <View style={{ flex: 1 }}><Text style={styles.insightTitle}>Construye tu tendencia</Text><Text style={styles.insightText}>Al cerrar cada período verás cuánto gastaste, ahorraste y pasaste al mes siguiente.</Text></View>
-      </View>
       {!data.periods.length ? <Empty icon="bar-chart-outline" text="Tu primer resumen aparecerá cuando cierres el período." /> :
         data.periods.map((p) => (
           <View key={p.id} style={styles.periodCard}>
@@ -717,21 +726,51 @@ function AppContent() {
       return acc;
     }, {});
     const upcoming = [...activeFixed].sort((a, b) => (a.dueDay || 32) - (b.dueDay || 32));
+    const selectedDayBills = selectedCalendarDay ? (billsByDay[selectedCalendarDay] || []) : [];
+    const todayLabel = today.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' }).toUpperCase();
     return (
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <Header title="Calendario" subtitle={`PAGOS DE ${budgetMonth}`} />
+        <View style={styles.todayPill}>
+          <View style={styles.todayPillDot} />
+          <Text style={styles.todayPillText}>HOY · {todayLabel}</Text>
+          {todayInCalendar === null && <Text style={styles.todayPillHint}>Planificando otro mes</Text>}
+        </View>
         <View style={styles.calendarCard}>
           <View style={styles.weekRow}>{['L','M','M','J','V','S','D'].map((d, i) => <Text key={`${d}-${i}`} style={styles.weekDay}>{d}</Text>)}</View>
           <View style={styles.calendarGrid}>
             {Array.from({ length: mondayOffset }).map((_, i) => <View key={`blank-${i}`} style={styles.dayCell} />)}
             {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => (
-              <View key={day} style={[styles.dayCell, billsByDay[day]?.length && styles.dayCellDue, todayInCalendar === day && styles.dayCellToday]}>
+              <Pressable
+                key={day}
+                disabled={!billsByDay[day]?.length}
+                onPress={() => setSelectedCalendarDay(selectedCalendarDay === day ? null : day)}
+                style={[styles.dayCell, billsByDay[day]?.length && styles.dayCellDue, todayInCalendar === day && styles.dayCellToday, selectedCalendarDay === day && styles.dayCellSelected]}
+              >
                 <Text style={[styles.dayNumber, billsByDay[day]?.length && styles.dayNumberDue, todayInCalendar === day && styles.dayNumberToday]}>{day}</Text>
                 {!!billsByDay[day]?.length && <View style={styles.calendarDot} />}
-              </View>
+              </Pressable>
             ))}
           </View>
         </View>
+        {!!selectedDayBills.length && (
+          <View style={styles.calendarPreview}>
+            <View style={styles.calendarPreviewTop}>
+              <View><Text style={styles.calendarPreviewEyebrow}>PAGOS PROGRAMADOS</Text><Text style={styles.calendarPreviewTitle}>{selectedCalendarDay} de {monthDate.toLocaleDateString('es-CO', { month: 'long' })}</Text></View>
+              <Pressable style={styles.calendarPreviewClose} onPress={() => setSelectedCalendarDay(null)}><Icon name="close" size={18} color={COLORS.muted} /></Pressable>
+            </View>
+            {selectedDayBills.map((item) => {
+              const remaining = Math.max(0, item.amount - fixedPaidAmount(item));
+              return (
+                <Pressable key={item.id} style={styles.calendarPreviewRow} onPress={() => openFixedPayment(item)}>
+                  <View style={styles.calendarPreviewIcon}><Icon name="receipt" size={19} color={COLORS.mint} /></View>
+                  <View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{remaining ? `${money(remaining)} pendientes` : 'Pagado'}</Text></View>
+                  <Icon name="chevron-forward" size={18} color={COLORS.muted} />
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
         <Text style={[styles.sectionTitle, { marginTop: 24, marginBottom: 12 }]}>Próximos pagos</Text>
         {!upcoming.length ? <Empty icon="calendar" text="Agrega gastos fijos para ver sus fechas en el calendario." /> : upcoming.map((item) => {
           const remaining = Math.max(0, item.amount - fixedPaidAmount(item));
@@ -896,8 +935,8 @@ function AppContent() {
                 <Text style={styles.referenceValue} selectable>{selectedFixed.paymentReference}</Text>
               </View>
               <Pressable style={styles.copyButton} onPress={() => copyPaymentReference(selectedFixed.paymentReference)}>
-                <Icon name="copy" size={18} color={COLORS.mint} />
-                <Text style={styles.copyText}>Copiar</Text>
+                <Icon name={referenceCopied ? "checkmark" : "copy"} size={18} color={COLORS.mint} />
+                <Text style={styles.copyText}>{referenceCopied ? 'Copiado' : 'Copiar'}</Text>
               </Pressable>
             </View>
           )}
@@ -1018,9 +1057,12 @@ function createStyles(colors) {
   navLabelOn: { color: COLORS.mint },
   fab: { position: 'absolute', right: 20, bottom: 92, width: 58, height: 58, borderRadius: 20, backgroundColor: COLORS.mint, alignItems: 'center', justifyContent: 'center', shadowColor: COLORS.mint, shadowOpacity: .35, shadowRadius: 12, elevation: 8 },
   overlay: { flex: 1, backgroundColor: '#00000099', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: COLORS.card, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 22, paddingBottom: 34 },
+  sheetSafeArea: { flex: 1 },
+  sheet: { maxHeight: '92%', backgroundColor: COLORS.card, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingTop: 12, paddingHorizontal: 22 },
+  sheetScroll: { flexShrink: 1 },
+  sheetContent: { paddingBottom: 34 },
   handle: { width: 40, height: 4, borderRadius: 4, backgroundColor: '#3B5166', alignSelf: 'center', marginBottom: 16 },
-  sheetTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 22 },
+  sheetTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 },
   sheetTitle: { color: COLORS.text, fontSize: 22, fontWeight: '800' },
   inputLabel: { color: COLORS.muted, fontSize: 12, fontWeight: '700', marginBottom: 7 },
   moneyInputWrap: { height: 56, borderRadius: 15, backgroundColor: COLORS.card2, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 15, borderWidth: 1, borderColor: COLORS.line },
@@ -1101,6 +1143,10 @@ function createStyles(colors) {
   themeSwatch: { height: 64, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   themeDot: { width: 20, height: 20, borderRadius: 10 },
   themeName: { color: COLORS.text, fontSize: 12, fontWeight: '800', textAlign: 'center', marginTop: 8 },
+  todayPill: { alignSelf: 'flex-start', minHeight: 32, borderRadius: 12, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: COLORS.gold + '14', borderWidth: 1, borderColor: COLORS.gold + '32', marginBottom: 12 },
+  todayPillDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: COLORS.gold },
+  todayPillText: { color: COLORS.gold, fontSize: 10, fontWeight: '900', letterSpacing: .7 },
+  todayPillHint: { color: COLORS.muted, fontSize: 9, marginLeft: 2 },
   calendarCard: { backgroundColor: COLORS.card, borderRadius: 24, padding: 16, borderWidth: 1, borderColor: COLORS.line },
   weekRow: { flexDirection: 'row', marginBottom: 8 },
   weekDay: { width: '14.285%', color: COLORS.muted, textAlign: 'center', fontSize: 10, fontWeight: '800' },
@@ -1108,10 +1154,18 @@ function createStyles(colors) {
   dayCell: { width: '14.285%', height: 43, alignItems: 'center', justifyContent: 'center', borderRadius: 13 },
   dayCellDue: { backgroundColor: COLORS.mint + '16' },
   dayCellToday: { borderWidth: 2, borderColor: COLORS.gold, backgroundColor: COLORS.gold + '12' },
+  dayCellSelected: { borderWidth: 2, borderColor: COLORS.mint, backgroundColor: COLORS.mint + '22' },
   dayNumber: { color: COLORS.muted, fontSize: 12, fontWeight: '700' },
   dayNumberDue: { color: COLORS.text, fontWeight: '900' },
   dayNumberToday: { color: COLORS.gold, fontWeight: '900' },
   calendarDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: COLORS.mint, marginTop: 3 },
+  calendarPreview: { marginTop: 12, borderRadius: 20, padding: 15, backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.mint + '30' },
+  calendarPreviewTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  calendarPreviewEyebrow: { color: COLORS.mint, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  calendarPreviewTitle: { color: COLORS.text, fontSize: 17, fontWeight: '900', marginTop: 3 },
+  calendarPreviewClose: { width: 34, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.card },
+  calendarPreviewRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderColor: COLORS.line },
+  calendarPreviewIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.mint + '12', marginRight: 10 },
   calendarBill: { minHeight: 70, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderColor: COLORS.line },
   calendarDate: { width: 48, height: 48, borderRadius: 15, backgroundColor: COLORS.card, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   calendarDateDay: { color: COLORS.text, fontSize: 17, fontWeight: '900' },
