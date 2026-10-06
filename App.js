@@ -212,6 +212,10 @@ function AppContent() {
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
   const [category, setCategory] = useState('Comida');
+  const [planFilter, setPlanFilter] = useState('pending');
+  const [planSearch, setPlanSearch] = useState('');
+  const [pickedFixed, setPickedFixed] = useState([]);
+  const [addingFixed, setAddingFixed] = useState(false);
   const cycle = cycleFor(new Date(), data.activeCycleStart);
   const activeTheme = THEMES[data.theme] || THEMES.menta;
   Object.assign(COLORS, activeTheme);
@@ -269,6 +273,18 @@ function AppContent() {
   const spendingStart = new Date() < cycle.start ? cycle.start : new Date();
   const remainingDays = daysBetween(spendingStart, cycle.end);
   const daily = Math.max(0, available / remainingDays);
+  const fixedDate = (item) => {
+    const month = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 1);
+    const last = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+    return new Date(month.getFullYear(), month.getMonth(), Math.min(item.dueDay || last, last));
+  };
+  const pendingFixed = activeFixed.filter((item) => fixedPaidAmount(item) < item.amount)
+    .sort((a, b) => fixedDate(a) - fixedDate(b) || a.name.localeCompare(b.name));
+  const completedFixed = activeFixed.filter((item) => fixedPaidAmount(item) >= item.amount);
+  const inactiveFixed = data.fixed.filter((item) => item.active === false);
+  const visibleFixed = (planFilter === 'pending' ? pendingFixed : planFilter === 'paid' ? completedFixed : [...activeFixed].sort((a, b) => fixedDate(a) - fixedDate(b)))
+    .filter((item) => item.name.toLocaleLowerCase().includes(planSearch.trim().toLocaleLowerCase()));
+  const pendingTotal = Math.max(0, fixedTotal - paidFixed);
 
   const closeSheet = () => {
     setSheet(null); setAmount(''); setName(''); setDueDay(''); setCategory('Comida');
@@ -436,6 +452,53 @@ function AppContent() {
       : current);
   };
 
+  const includePickedFixed = async () => {
+    if (addingFixed || !pickedFixed.length) return;
+    setAddingFixed(true);
+    try {
+      for (const item of inactiveFixed.filter((x) => pickedFixed.includes(x.id))) {
+        await toggleFixedActive(item, true);
+      }
+      setPickedFixed([]);
+      setPlanFilter('pending');
+      closeSheet();
+    } catch {
+      Alert.alert('No se pudieron agregar todos', 'Los gastos agregados están en tu plan. Intenta nuevamente con los restantes.');
+    } finally {
+      setAddingFixed(false);
+    }
+  };
+
+  const removeFromMonth = () => setConfirmDialog({
+    title: 'Quitar de este mes',
+    message: `${selectedFixed.name} volverá a los gastos disponibles. Sus abonos de este mes se reiniciarán y sus avisos se cancelarán.`,
+    confirmLabel: 'Quitar del mes',
+    onConfirm: async () => {
+      await toggleFixedActive(selectedFixed, false);
+      setConfirmDialog(null);
+      closeSheet();
+    }
+  });
+
+  const markFixedPaid = () => {
+    const remaining = Math.max(0, selectedFixed.amount - fixedPaidAmount(selectedFixed));
+    if (!remaining) return;
+    setConfirmDialog({
+      title: 'Marcar como pagado',
+      message: `Registrarás el pago de ${money(remaining)} para completar ${selectedFixed.name}.`,
+      confirmLabel: 'Confirmar pago',
+      onConfirm: () => {
+        setData((d) => ({ ...d, fixed: d.fixed.map((x) => x.id !== selectedFixed.id ? x : {
+          ...x, paid: true, paidAmount: x.amount,
+          installmentsPaid: Math.min(x.installmentsTotal || 0, (x.installmentsPaid || 0) + (x.installmentsTotal && !x.installmentAdvanced ? 1 : 0)),
+          installmentAdvanced: Boolean(x.installmentsTotal || x.installmentAdvanced)
+        }) }));
+        setConfirmDialog(null);
+        closeSheet();
+      }
+    });
+  };
+
   const addFixedPayment = () => {
     const value = parseMoney(amount);
     if (!selectedFixed || !value) return Alert.alert('Falta el abono', 'Ingresa el valor que pagaste.');
@@ -504,7 +567,7 @@ function AppContent() {
 
   const endPeriod = () => setConfirmDialog({
     title: 'Cerrar y planificar el siguiente',
-    message: `Guardaremos este período y ${money(Math.max(0, available))} pasarán al siguiente. Tus gastos fijos quedarán disponibles, pero desactivados para que elijas cuáles incluir.`,
+    message: `Guardaremos en el historial que sobraron ${money(Math.max(0, available))}. El siguiente período comenzará solo con el sueldo que configures. Tus gastos fijos quedarán disponibles, pero desactivados para que elijas cuáles incluir.`,
     confirmLabel: 'Cerrar período',
     onConfirm: async () => {
       await Promise.all(data.fixed.flatMap((item) => (item.notificationIds || []).map((id) =>
@@ -513,7 +576,7 @@ function AppContent() {
       const nextStart = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 2, 0);
       setData((d) => ({
         ...d,
-        carry: Math.max(0, available),
+        carry: 0,
         activeCycleStart: nextStart.toISOString(),
         planningNext: true,
         periods: [{
@@ -545,7 +608,7 @@ function AppContent() {
 
   const renderHome = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Header title="Tu flujo" subtitle={`PRESUPUESTO DE ${budgetMonth} · ${shortDate(cycle.start)} — ${shortDate(cycle.end)}`} />
+      <Header title="Tu mes, en orden" subtitle={`PRESUPUESTO DE ${budgetMonth}`} />
       {!data.salary ? (
         <Pressable style={styles.welcome} onPress={() => setSheet('salary')}>
           <View style={styles.welcomeIcon}><Icon name="sparkles" size={22} color={COLORS.gold} /></View>
@@ -573,12 +636,30 @@ function AppContent() {
               <Text style={styles.dailyAmount}>{money(daily)}</Text>
               <Text style={styles.dailyHint}>Disponible ÷ {remainingDays} días, después de gastos fijos y ahorro.</Text>
             </View>
-            <View style={styles.pill}><Text style={styles.pillText}>EN RITMO</Text></View>
           </View>
           <View style={styles.row}>
-            <Stat label="Pagos pendientes" value={`${activeFixed.filter((x) => !x.paid).length}`} />
-            <Stat label="Gastado este período" value={money(variableSpent)} />
+            <Pressable style={styles.overviewTile} onPress={() => { setPlanFilter('pending'); setTab('plan'); }}>
+              <Text style={styles.fixedHint}>POR PAGAR · {pendingFixed.length}</Text>
+              <Text style={styles.overviewAmount}>{money(pendingTotal)}</Text>
+              <Text style={styles.link}>Ver pendientes ›</Text>
+            </Pressable>
+            <Pressable style={styles.overviewTile} onPress={() => { setPlanFilter('paid'); setTab('plan'); }}>
+              <Text style={styles.fixedHint}>PAGADO · {completedFixed.length}</Text>
+              <Text style={styles.overviewAmount}>{money(paidFixed)}</Text>
+              <Text style={styles.link}>Ver pagos ›</Text>
+            </Pressable>
           </View>
+          <View style={styles.sectionTop}>
+            <Text style={styles.sectionTitle}>Próximos pagos</Text>
+            <Pressable onPress={() => { setPlanFilter('pending'); setTab('plan'); }}><Text style={styles.link}>Ver todos</Text></Pressable>
+          </View>
+          {pendingFixed.length ? <View style={styles.summaryCard}>{pendingFixed.slice(0, 3).map((item) => (
+            <Pressable key={item.id} style={styles.compactPayment} onPress={() => openFixedPayment(item)}>
+              <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{shortDate(fixedDate(item))} · {fixedDate(item) < new Date(new Date().setHours(0, 0, 0, 0)) ? 'Vencido' : 'Pendiente'}</Text></View>
+              <Text style={styles.summaryValue}>{money(item.amount - fixedPaidAmount(item))}</Text>
+              <Icon name="chevron-forward" size={16} color={COLORS.muted} />
+            </Pressable>
+          ))}</View> : <Empty icon="checkmark" text="Todo al día. No tienes pagos pendientes incluidos en este mes." />}
           <View style={styles.sectionTop}>
             <Text style={styles.sectionTitle}>Resumen del período</Text>
             <Pressable onPress={() => setTab('plan')}><Text style={styles.link}>Ver plan</Text></Pressable>
@@ -605,27 +686,39 @@ function AppContent() {
 
   const renderPlan = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Header title="Mi plan" subtitle="DINERO CON PROPÓSITO" />
+      <Header title="Mi plan" subtitle={budgetMonth.toLocaleUpperCase()} />
       <View style={styles.planHero}>
-        <Text style={styles.planHeroLabel}>COMPROMETIDO</Text>
-        <Text style={styles.planHeroValue}>{money(fixedTotal + data.goal)}</Text>
-        <Text style={styles.planHeroSub}>de {money(totalBase)} disponibles</Text>
+        <Text style={styles.planHeroLabel}>POR PAGAR ESTE MES</Text>
+        <Text style={styles.planHeroValue}>{money(pendingTotal)}</Text>
+        <Text style={styles.planHeroSub}>{pendingFixed.length} pendientes · {money(paidFixed)} abonados</Text>
+        <View style={styles.progressBg}><View style={[styles.progress, { width: `${fixedTotal ? Math.min(100, paidFixed / fixedTotal * 100) : 0}%` }]} /></View>
       </View>
       <View style={styles.sectionTop}>
-        <Text style={styles.sectionTitle}>Gastos fijos</Text>
+        <Text style={styles.sectionTitle}>Incluidos este mes</Text>
         <Pressable style={styles.addMini} onPress={() => setSheet('fixed')}>
-          <Icon name="add" size={18} color={COLORS.bg} /><Text style={styles.addMiniText}>Agregar</Text>
+          <Icon name="add" size={18} color={COLORS.bg} /><Text style={styles.addMiniText}>Nuevo</Text>
         </Pressable>
       </View>
       {data.planningNext && (
         <View style={styles.planningNote}>
           <Icon name="calendar" size={21} color={COLORS.mint} />
-          <Text style={styles.planningNoteText}>Estás preparando {budgetMonth}. Activa solo los gastos que quieras incluir; puedes abrir cualquiera para modificarlo.</Text>
+          <Text style={styles.planningNoteText}>Estás preparando {budgetMonth}. Agrega tus gastos guardados para organizar los pagos del mes.</Text>
         </View>
       )}
-      {!data.fixed.length ? <Empty icon="home-outline" text="Agrega arriendo, servicios, cuotas y suscripciones." /> :
+      <Pressable style={styles.includeButton} onPress={() => { setPickedFixed([]); setSheet('includeFixed'); }}>
+        <Icon name="add" size={20} color={COLORS.mint} /><Text style={styles.editButtonText}>Agregar gastos del mes ({inactiveFixed.length})</Text>
+      </Pressable>
+      <View style={styles.planFilters}>
+        {[['pending', 'Pendientes', pendingFixed.length], ['paid', 'Pagados', completedFixed.length], ['all', 'Todos', activeFixed.length]].map(([id, label, count]) => (
+          <Pressable key={id} accessibilityRole="button" accessibilityState={{ selected: planFilter === id }} style={[styles.planFilter, planFilter === id && styles.chipOn]} onPress={() => setPlanFilter(id)}>
+            <Text style={[styles.chipText, planFilter === id && styles.chipTextOn]}>{label} ({count})</Text>
+          </Pressable>
+        ))}
+      </View>
+      <TextInput style={styles.textInput} value={planSearch} onChangeText={setPlanSearch} placeholder="Buscar gasto por nombre" placeholderTextColor={COLORS.muted} accessibilityLabel="Buscar gasto por nombre" />
+      {!visibleFixed.length ? <Empty icon="home-outline" text={planSearch ? 'No encontramos ese gasto en este filtro.' : !activeFixed.length ? 'Agrega gastos del mes o crea uno nuevo para empezar tu plan.' : planFilter === 'paid' ? 'Aquí aparecerán los gastos que completes.' : 'No tienes gastos pendientes en este filtro.'} /> :
         <View style={styles.summaryCard}>
-          {data.fixed.map((item) => {
+          {visibleFixed.map((item) => {
             const isActive = item.active !== false;
             const itemPaid = fixedPaidAmount(item);
             const remaining = Math.max(0, item.amount - itemPaid);
@@ -634,23 +727,17 @@ function AppContent() {
               ? Math.max(0, item.installmentsTotal - (item.installmentsPaid || 0))
               : null;
             return (
-            <Pressable key={item.id} style={[styles.fixedRow, !isActive && styles.fixedRowInactive]} onPress={() => openFixedPayment(item)}>
-              <View style={[styles.check, isActive && completed && styles.checkOn]}>
-                {isActive && completed && <Icon name="checkmark" size={15} color={COLORS.bg} />}
-              </View>
+            <Pressable key={item.id} style={styles.compactPayment} onPress={() => openFixedPayment(item)}>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.fixedName, isActive && completed && styles.done, !isActive && styles.inactiveText]}>{item.name}</Text>
-                <Text style={styles.fixedHint}>{!isActive ? `Desactivado · vence el ${item.dueDay || '—'}` : completed ? 'Pagado' : `${money(itemPaid)} abonados · vence el ${item.dueDay || '—'}`}</Text>
+                <Text numberOfLines={1} style={styles.fixedName}>{item.name}</Text>
+                <Text style={[styles.fixedHint, !completed && fixedDate(item) < new Date(new Date().setHours(0, 0, 0, 0)) && { color: COLORS.danger }]}>{shortDate(fixedDate(item))} · {completed ? 'Pagado' : fixedDate(item) < new Date(new Date().setHours(0, 0, 0, 0)) ? 'Vencido' : itemPaid ? 'Pago parcial' : 'Pendiente'}</Text>
                 {installmentsLeft !== null && <Text style={styles.installmentText}>{installmentsLeft} cuotas pendientes</Text>}
               </View>
-              {data.planningNext ? (
-                <Switch value={isActive} onValueChange={(enabled) => toggleFixedActive(item, enabled)} trackColor={{ false: COLORS.line, true: COLORS.mintDark }} thumbColor={isActive ? COLORS.mint : COLORS.muted} />
-              ) : (
                 <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.summaryValue}>{money(remaining)}</Text>
-                  <Text style={styles.remainingLabel}>restante</Text>
+                  <Text style={styles.summaryValue}>{money(item.amount)}</Text>
+                  <Text style={[styles.remainingLabel, { color: completed ? COLORS.mint : COLORS.muted }]}>{completed ? 'Pagado' : `Pendiente ${money(remaining)}`}</Text>
                 </View>
-              )}
+              <Icon name="chevron-forward" size={16} color={COLORS.muted} />
             </Pressable>
           )})}
           <Text style={styles.paidLine}>{money(paidFixed)} pagados de {money(fixedTotal)}</Text>
@@ -662,7 +749,7 @@ function AppContent() {
         <View style={{ flex: 1 }}><Text style={styles.fixedName}>Mi colchón</Text><Text style={styles.fixedHint}>Separado antes de gastar</Text></View>
         <Text style={styles.goalValue}>{money(data.goal)}</Text>
       </Pressable>
-      <Pressable style={styles.outlineButton} onPress={endPeriod}><Text style={styles.outlineText}>Cerrar período y pasar saldo</Text></Pressable>
+      <Pressable style={styles.outlineButton} onPress={endPeriod}><Text style={styles.outlineText}>Cerrar período</Text></Pressable>
       <View style={{ height: 110 }} />
     </ScrollView>
   );
@@ -912,19 +999,33 @@ function AppContent() {
         </View>
         <Pressable style={styles.primaryButton} onPress={sheet === 'editFixed' ? updateFixed : addFixed}><Text style={styles.primaryText}>{sheet === 'editFixed' ? 'Guardar cambios' : 'Agregar al plan'}</Text></Pressable>
       </Sheet>
-      <Sheet visible={sheet === 'payFixed'} onClose={closeSheet} title={selectedFixed?.active === false ? selectedFixed.name : selectedFixed ? `Abonar a ${selectedFixed.name}` : 'Registrar abono'}>
+      <Sheet visible={sheet === 'includeFixed'} onClose={() => { if (!addingFixed) closeSheet(); }} title="Agregar gastos del mes">
+        <Text style={styles.sheetNote}>Selecciona los gastos guardados que quieres incluir en {budgetMonth}. Puedes revisar o editar cada uno después.</Text>
+        {!inactiveFixed.length ? <Empty icon="checkmark" text="Todos tus gastos guardados ya están incluidos. Puedes crear uno nuevo desde Mi plan." /> : <>
+          <Pressable style={styles.editButton} disabled={addingFixed} onPress={() => setPickedFixed(pickedFixed.length === inactiveFixed.length ? [] : inactiveFixed.map((x) => x.id))}><Text style={styles.editButtonText}>{pickedFixed.length === inactiveFixed.length ? 'Quitar selección' : 'Seleccionar todos'}</Text></Pressable>
+          {inactiveFixed.map((item) => (
+            <Pressable key={item.id} disabled={addingFixed} accessibilityRole="checkbox" accessibilityState={{ checked: pickedFixed.includes(item.id) }} style={styles.compactPayment} onPress={() => setPickedFixed((ids) => ids.includes(item.id) ? ids.filter((id) => id !== item.id) : [...ids, item.id])}>
+              <View style={[styles.check, pickedFixed.includes(item.id) && styles.checkOn]}>{pickedFixed.includes(item.id) && <Icon name="checkmark" size={15} color={COLORS.bg} />}</View>
+              <View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{shortDate(fixedDate(item))}</Text></View>
+              <Text style={styles.summaryValue}>{money(item.amount)}</Text>
+            </Pressable>
+          ))}
+          <Text style={styles.paidLine}>{pickedFixed.length} seleccionados · {money(inactiveFixed.filter((x) => pickedFixed.includes(x.id)).reduce((sum, x) => sum + x.amount, 0))}</Text>
+          <Pressable disabled={addingFixed || !pickedFixed.length} style={[styles.primaryButton, (addingFixed || !pickedFixed.length) && { opacity: .45 }]} onPress={includePickedFixed}><Text style={styles.primaryText}>{addingFixed ? 'Agregando…' : `Agregar ${pickedFixed.length} al mes`}</Text></Pressable>
+        </>}
+      </Sheet>
+      <Sheet visible={sheet === 'payFixed'} onClose={closeSheet} title={selectedFixed?.name || 'Detalle del gasto'}>
         {selectedFixed && <>
           {selectedFixed.active === false && (
             <View style={styles.activationRow}>
-              <View style={{ flex: 1 }}><Text style={styles.fixedName}>Incluir en {budgetMonth}</Text><Text style={styles.fixedHint}>Al activarlo contará en tu presupuesto y se crearán sus avisos.</Text></View>
-              <Switch value={false} onValueChange={() => toggleFixedActive(selectedFixed, true)} trackColor={{ false: COLORS.line, true: COLORS.mintDark }} thumbColor={COLORS.muted} />
+              <Pressable onPress={() => toggleFixedActive(selectedFixed, true)}><Text style={styles.editButtonText}>Agregar a {budgetMonth}</Text></Pressable>
             </View>
           )}
           <View style={styles.paymentSummary}>
             <Stat label="Valor total" value={money(selectedFixed.amount)} />
             <Stat label="Pendiente" value={money(Math.max(0, selectedFixed.amount - fixedPaidAmount(selectedFixed)))} />
           </View>
-          {selectedFixed.active !== false && <>
+          {selectedFixed.active !== false && fixedPaidAmount(selectedFixed) < selectedFixed.amount && <>
             <MoneyField label="¿Cuánto pagaste?" value={amount} onChange={setAmount} />
             <Text style={styles.sheetNote}>Puedes registrar varios abonos hasta completar el gasto. El saldo seguirá visible como pendiente.</Text>
           </>}
@@ -950,7 +1051,11 @@ function AppContent() {
             <Icon name="edit" size={18} color={COLORS.mint} />
             <Text style={styles.editButtonText}>Editar gasto fijo</Text>
           </Pressable>
-          {selectedFixed.active !== false && <Pressable style={styles.primaryButton} onPress={addFixedPayment}><Text style={styles.primaryText}>Guardar abono</Text></Pressable>}
+          {selectedFixed.active !== false && fixedPaidAmount(selectedFixed) < selectedFixed.amount && <>
+            <Pressable style={styles.primaryButton} onPress={addFixedPayment}><Text style={styles.primaryText}>Guardar abono</Text></Pressable>
+            <Pressable style={styles.editButton} onPress={markFixedPaid}><Icon name="checkmark" size={18} color={COLORS.mint} /><Text style={styles.editButtonText}>Marcar como pagado</Text></Pressable>
+          </>}
+          {selectedFixed.active !== false && <Pressable style={styles.editButton} onPress={removeFromMonth}><Text style={styles.editButtonText}>Quitar de este mes</Text></Pressable>}
           <Pressable style={styles.deleteButton} onPress={deleteFixed}>
             <Icon name="trash" size={18} color={COLORS.danger} />
             <Text style={styles.deleteButtonText}>Eliminar gasto fijo</Text>
@@ -1080,6 +1185,12 @@ function createStyles(colors) {
   reminderNote: { flexDirection: 'row', gap: 10, padding: 13, borderRadius: 13, backgroundColor: '#F4C96B10', marginBottom: 18 },
   reminderText: { flex: 1, color: COLORS.muted, fontSize: 11, lineHeight: 17 },
   planHero: { borderRadius: 22, padding: 20, backgroundColor: COLORS.card },
+  overviewTile: { flex: 1, padding: 16, borderRadius: 18, backgroundColor: COLORS.card, gap: 8 },
+  overviewAmount: { color: COLORS.text, fontSize: 19, fontWeight: '800' },
+  compactPayment: { flexDirection: 'row', alignItems: 'center', minHeight: 72, paddingVertical: 12, gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: COLORS.line },
+  includeButton: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, padding: 14, borderRadius: 15, backgroundColor: COLORS.mint + '12', marginBottom: 16 },
+  planFilters: { flexDirection: 'row', gap: 6, marginBottom: 14 },
+  planFilter: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: COLORS.card2 },
   planHeroLabel: { color: COLORS.mint, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
   planHeroValue: { color: COLORS.text, fontSize: 28, fontWeight: '800', marginTop: 7 },
   planHeroSub: { color: COLORS.muted, fontSize: 12, marginTop: 3 },
