@@ -1,13 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Switch,
-  Text, TextInput, View, Linking
+  Alert, Animated, BackHandler, Image, Modal, Pressable, ScrollView, StyleSheet, Switch,
+Text, TextInput, View, Linking, useWindowDimensions
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import {
   BarChart3, Bell, Banknote, Car, ChartPie, Check, ChevronRight, CircleEllipsis,
   CalendarDays, Copy, ExternalLink, Fingerprint, Gamepad2, History, Home, Leaf, Plus, ReceiptText,
-  Pencil, Settings, ShieldCheck, ShoppingCart, Sparkles, Sun, Trash2, TrendingUp, X
+  Pencil, Settings, ShieldCheck, ShoppingCart, Sparkles, Sun, Trash2, TrendingUp, X, EllipsisVertical
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
@@ -57,7 +57,7 @@ const ICONS = {
   settings: Settings, shield: ShieldCheck, 'shield-checkmark': ShieldCheck,
   sparkles: Sparkles, sunny: Sun, time: History, 'trending-up': TrendingUp,
   cash: Banknote
-  , copy: Copy, edit: Pencil, 'external-link': ExternalLink, trash: Trash2
+  , copy: Copy, edit: Pencil, 'external-link': ExternalLink, trash: Trash2, options: EllipsisVertical
 };
 
 function Icon({ name, size = 24, color = COLORS.text }) {
@@ -77,13 +77,38 @@ const seed = {
   periods: [],
   activeCycleStart: null,
   planningNext: false
-  , payDay: 31, salaryReceived: false, salaryPlanVersion: 1
+  , payDay: 31, salaryPlanVersion: 1
 };
 
 const copFormatter = new Intl.NumberFormat('es-CO', {
   style: 'currency', currency: 'COP', maximumFractionDigits: 0
 });
 const money = (n) => copFormatter.format(Number(n || 0));
+const PAYMENT_CATEGORIES = { Arriendo: '#B399FF', Servicios: '#529BFF', Deudas: '#FF6666', Alimentación: '#FFA447', Transporte: '#40D8DE', Sueldo: '#A3DB45', Ahorro: '#F2D34F', Ocio: '#EF82CD', Otros: '#A4ADBB' };
+const PAGE_ORDER = ['inicio', 'plan', 'calendar', 'history', 'settings'];
+const predictCategory = (name) => {
+  const text = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const rules = [
+    ['Arriendo', /\b(arriendo|alquiler|renta|arrendamiento)\b/],
+    ['Deudas', /\b(deuda|credito|prestamo|tarjeta|cuota|hipoteca|nu|bancolombia|davivienda|bbva|icetex|sistecredito|addi)\b/],
+    ['Ahorro', /\b(ahorro|ahorros|inversion|inversiones|colchon|emergencia|cdt|alcancia)\b/],
+    ['Sueldo', /\b(sueldo|salario|nomina|pago laboral|honorarios)\b/],
+    ['Servicios', /\b(agua|luz|gas|energia|electricidad|electrohuila|enel|epm|celsia|internet|wifi|telefono|celular|movil|claro|movistar|tigo|wom|acueducto|aseo|administracion)\b/],
+    ['Alimentación', /\b(mercado|comida|alimentacion|supermercado|almuerzo|desayuno|cena|restaurante|domicilio|despensa|exito|d1|ara|jumbo)\b/],
+    ['Transporte', /\b(transporte|gasolina|combustible|diesel|uber|didi|taxi|bus|pasaje|parqueadero|peaje|moto|carro|soat)\b/],
+    ['Ocio', /\b(ocio|netflix|spotify|cine|disney|hbo|max|prime|juego|videojuego|concierto|gimnasio|gym|vacaciones)\b/]
+  ];
+  return rules.find(([, pattern]) => pattern.test(text))?.[0] || 'Otros';
+};
+const normalizeCategory = (category) => category === 'Comida' ? 'Alimentación' : PAYMENT_CATEGORIES[category] ? category : 'Otros';
+const categoryAmountsFor = (fixed, expenses, goal) => [...fixed, ...expenses].reduce((totals, item) => {
+  const label = normalizeCategory(item.category);
+  totals[label] = (totals[label] || 0) + item.amount;
+  return totals;
+}, { Ahorro: Number(goal) || 0 });
+const BUDGET_GROUPS = { needs: 'Necesidades', wants: 'Gustos', savings: 'Ahorro' };
+const budgetGroupFor = (item) => item.category === 'Ahorro' ? 'savings' : ['Arriendo', 'Servicios', 'Deudas', 'Alimentación', 'Comida', 'Transporte'].includes(item.category) ? 'needs' : 'wants';
+const budgetTotalsFor = (fixed, expenses, goal) => [...fixed, ...expenses].reduce((totals, item) => { totals[budgetGroupFor(item)] += Number(item.amount) || 0; return totals; }, { needs: 0, wants: 0, savings: Number(goal) || 0 });
 
 const parseMoney = (value) => Number(String(value).replace(/\D/g, '')) || 0;
 const formatMoneyInput = (value) => {
@@ -218,16 +243,43 @@ function AppContent() {
   const [referenceCopied, setReferenceCopied] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
-  const [category, setCategory] = useState('Comida');
+  const [category, setCategory] = useState('Alimentación');
   const [planFilter, setPlanFilter] = useState('pending');
   const [planSearch, setPlanSearch] = useState('');
-  const [pickedFixed, setPickedFixed] = useState([]);
-  const [addingFixed, setAddingFixed] = useState(false);
   const [paymentAction, setPaymentAction] = useState(null);
   const [expenseMenu, setExpenseMenu] = useState(false);
+  const expenseMenuRef = useRef(null);
+  const [expenseMenuAnchor, setExpenseMenuAnchor] = useState({ x: 20, y: 100 });
   const [paymentTiming, setPaymentTiming] = useState('payday');
   const [deadlineDay, setDeadlineDay] = useState('');
   const [calendarOffset, setCalendarOffset] = useState(1);
+  const [fixedCategory, setFixedCategory] = useState('Otros');
+  const [categoryManuallySet, setCategoryManuallySet] = useState(false);
+  const [expandedPeriods, setExpandedPeriods] = useState([]);
+  const [fabOpen, setFabOpen] = useState(false);
+  const [budgetGroup, setBudgetGroup] = useState('auto');
+  const fabProgress = useRef(new Animated.Value(0)).current;
+  const pageRef = useRef(null);
+  const pagePosition = useRef(0);
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  useEffect(() => {
+    const index = PAGE_ORDER.indexOf(tab);
+    if (index >= 0 && Math.abs(pagePosition.current - index * screenWidth) > 1) {
+      pageRef.current?.scrollTo({ x: index * screenWidth, animated: true });
+    }
+  }, [tab, screenWidth, loaded, locked]);
+  useEffect(() => {
+    Animated.timing(fabProgress, { toValue: fabOpen ? 1 : 0, duration: 160, useNativeDriver: true }).start();
+  }, [fabOpen, fabProgress]);
+  useEffect(() => {
+    const back = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (fabOpen) { setFabOpen(false); return true; }
+      if (expenseMenu) { setExpenseMenu(false); return true; }
+      if (tab !== 'inicio') { setTab('inicio'); return true; }
+      return false;
+    });
+    return () => back.remove();
+  }, [tab, fabOpen, expenseMenu]);
   const cycle = cycleFor(new Date(), data.activeCycleStart);
   const activeTheme = THEMES[data.theme] || THEMES.menta;
   Object.assign(COLORS, activeTheme);
@@ -248,7 +300,20 @@ function AppContent() {
         const base = raw ? cycleFor(new Date()).start : new Date();
         saved.activeCycleStart = new Date(base.getFullYear(), base.getMonth(), Math.min(saved.payDay, new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate())).toISOString();
       }
-      if (raw && !JSON.parse(raw).salaryPlanVersion) saved.salaryReceived = new Date(saved.activeCycleStart) <= new Date();
+      delete saved.salaryReceived;
+      const classifyExisting = saved.categoryDetectionVersion !== 1;
+      saved.fixed = saved.fixed.map((item) => {
+        const detected = classifyExisting ? predictCategory(item.name || '') : 'Otros';
+        return { ...item, category: detected !== 'Otros' ? detected : normalizeCategory(item.category), budgetGroup: 'auto' };
+      });
+      saved.categoryDetectionVersion = 1;
+      saved.expenses = saved.expenses.map((item) => ({ ...item, category: normalizeCategory(item.category) }));
+      for (const item of saved.fixed) {
+        if (item.active === false) {
+          item.active = true;
+          item.notificationIds = await schedulePaymentReminders(item.name, item.amount, item.dueDay, new Date(saved.activeCycleStart), item.paymentTiming || 'other');
+        }
+      }
       setData(saved);
       setLoaded(true);
       if (saved.biometric) {
@@ -270,7 +335,7 @@ function AppContent() {
       return;
     }
     const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: 'Desbloquear Flujo',
+      promptMessage: 'Finanzas Personales',
       cancelLabel: 'Cancelar',
       fallbackLabel: 'Usar clave del teléfono'
     });
@@ -286,7 +351,12 @@ function AppContent() {
   const paidFixed = activeFixed.reduce((sum, e) => sum + fixedPaidAmount(e), 0);
   const available = data.salary + data.carry - fixedTotal - variableSpent - data.goal;
   const totalBase = data.salary + data.carry;
-  const usedPct = totalBase ? Math.min(100, ((fixedTotal + variableSpent + data.goal) / totalBase) * 100) : 0;
+  const usedPct = totalBase ? ((fixedTotal + variableSpent + data.goal) / totalBase) * 100 : 0;
+  const distributionAmounts = categoryAmountsFor(activeFixed, currentExpenses, data.goal);
+  const distributionBase = Math.max(totalBase, fixedTotal + variableSpent + data.goal, 1);
+  const distribution = Object.entries(PAYMENT_CATEGORIES).map(([label, color]) => ({ label, color, amount: distributionAmounts[label] || 0 }))
+    .filter((part) => part.amount > 0)
+    .map((part) => ({ ...part, percent: totalBase > 0 ? part.amount / totalBase * 100 : 0, width: part.amount / distributionBase * 100 }));
   const spendingStart = new Date() < cycle.start ? cycle.start : new Date();
   const remainingDays = daysBetween(spendingStart, cycle.end);
   const daily = Math.max(0, available / remainingDays);
@@ -309,7 +379,6 @@ function AppContent() {
   const pendingFixed = activeFixed.filter((item) => fixedPaidAmount(item) < item.amount)
     .sort((a, b) => fixedDate(a) - fixedDate(b) || a.name.localeCompare(b.name));
   const completedFixed = activeFixed.filter((item) => fixedPaidAmount(item) >= item.amount);
-  const inactiveFixed = data.fixed.filter((item) => item.active === false);
   const visibleFixed = (planFilter === 'pending' ? pendingFixed : planFilter === 'paid' ? completedFixed : [...activeFixed].sort((a, b) => fixedDate(a) - fixedDate(b)))
     .filter((item) => item.name.toLocaleLowerCase().includes(planSearch.trim().toLocaleLowerCase()));
   const pendingTotal = Math.max(0, fixedTotal - paidFixed);
@@ -317,7 +386,9 @@ function AppContent() {
   const closeSheet = () => {
     setPaymentAction(null); setExpenseMenu(false);
     setPaymentTiming('payday'); setDeadlineDay('');
-    setSheet(null); setAmount(''); setName(''); setDueDay(''); setCategory('Comida');
+    setFixedCategory('Otros'); setCategoryManuallySet(false);
+    setBudgetGroup('auto');
+    setSheet(null); setAmount(''); setName(''); setDueDay(''); setCategory('Alimentación');
     setInstallmentsTotal(''); setInstallmentsPaid(''); setSelectedFixed(null); setSelectedExpense(null);
     setPaymentUrl('');
     setPaymentReference('');
@@ -358,7 +429,7 @@ function AppContent() {
       ...d,
       expenses: [{
         id: Date.now().toString(), amount: value, name: name || category,
-        category, date: new Date().toISOString(), period: cycle.id
+        category, budgetGroup, date: new Date().toISOString(), period: cycle.id
       }, ...d.expenses]
     }));
     closeSheet();
@@ -369,6 +440,7 @@ function AppContent() {
     setAmount(formatMoneyInput(item.amount));
     setName(item.name || '');
     setCategory(item.category || 'Otros');
+    setBudgetGroup(item.budgetGroup || 'auto');
     setSheet('editExpense');
   };
 
@@ -378,7 +450,7 @@ function AppContent() {
     setData((d) => ({
       ...d,
       expenses: d.expenses.map((item) => item.id === selectedExpense.id
-        ? { ...item, amount: value, name: name.trim() || category, category }
+        ? { ...item, amount: value, name: name.trim() || category, category, budgetGroup }
         : item)
     }));
     closeSheet();
@@ -400,7 +472,7 @@ function AppContent() {
     setData((d) => ({
       ...d, fixed: [...d.fixed, {
         id: Date.now().toString(), name: name.trim(), amount: value,
-        dueDay: day, paymentTiming, deadlineDay: Number(deadlineDay) || null, paid: false, paidAmount: 0, notificationIds, active: true,
+        dueDay: day, category: fixedCategory, budgetGroup: 'auto', paymentTiming, deadlineDay: Number(deadlineDay) || null, paid: false, paidAmount: 0, notificationIds, active: true,
         installmentsTotal: totalInstallments, installmentsPaid: alreadyPaid,
         installmentAdvanced: false, paymentUrl: paymentUrl.trim(),
         paymentReference: paymentReference.trim()
@@ -414,6 +486,8 @@ function AppContent() {
     setName(selectedFixed.name || '');
     setAmount(formatMoneyInput(selectedFixed.amount));
     setDueDay(String(selectedFixed.dueDay || ''));
+    setFixedCategory(selectedFixed.category || 'Otros'); setCategoryManuallySet(false);
+    setBudgetGroup(selectedFixed.budgetGroup || 'auto');
     setPaymentTiming(selectedFixed.paymentTiming || 'other'); setDeadlineDay(selectedFixed.deadlineDay ? String(selectedFixed.deadlineDay) : '');
     setInstallmentsTotal(selectedFixed.installmentsTotal ? String(selectedFixed.installmentsTotal) : '');
     setInstallmentsPaid(selectedFixed.installmentsPaid ? String(selectedFixed.installmentsPaid) : '');
@@ -443,7 +517,7 @@ function AppContent() {
     setData((d) => ({
       ...d,
       fixed: d.fixed.map((item) => item.id === selectedFixed.id ? {
-        ...item, name: name.trim(), amount: value, dueDay: day, paymentTiming, deadlineDay: Number(deadlineDay) || null,
+        ...item, name: name.trim(), amount: value, category: fixedCategory, budgetGroup: 'auto', dueDay: day, paymentTiming, deadlineDay: Number(deadlineDay) || null,
         paidAmount: Math.min(item.paidAmount || 0, value),
         paid: (item.paidAmount || 0) >= value,
         installmentsTotal: totalInstallments, installmentsPaid: alreadyPaid,
@@ -473,52 +547,6 @@ function AppContent() {
     setAmount('');
     setSheet('payFixed');
   };
-
-  const toggleFixedActive = async (item, enabled) => {
-    await Promise.all((item.notificationIds || []).map((id) =>
-      Notifications.cancelScheduledNotificationAsync(id).catch(() => {})
-    ));
-    const notificationIds = enabled
-      ? await schedulePaymentReminders(item.name, item.amount, item.dueDay, cycle.start, item.paymentTiming || 'other')
-      : [];
-    setData((d) => ({
-      ...d,
-      fixed: d.fixed.map((x) => x.id === item.id
-        ? { ...x, active: enabled, notificationIds, paid: false, paidAmount: 0, installmentAdvanced: false }
-        : x)
-    }));
-    setSelectedFixed((current) => current?.id === item.id
-      ? { ...current, active: enabled, notificationIds, paid: false, paidAmount: 0, installmentAdvanced: false }
-      : current);
-  };
-
-  const includePickedFixed = async () => {
-    if (addingFixed || !pickedFixed.length) return;
-    setAddingFixed(true);
-    try {
-      for (const item of inactiveFixed.filter((x) => pickedFixed.includes(x.id))) {
-        await toggleFixedActive(item, true);
-      }
-      setPickedFixed([]);
-      setPlanFilter('pending');
-      closeSheet();
-    } catch {
-      Alert.alert('No se pudieron agregar todos', 'Los gastos agregados están en tu plan. Intenta nuevamente con los restantes.');
-    } finally {
-      setAddingFixed(false);
-    }
-  };
-
-  const removeFromMonth = () => setConfirmDialog({
-    title: 'Quitar de este mes',
-    message: `${selectedFixed.name} volverá a los gastos disponibles. Sus abonos de este mes se reiniciarán y sus avisos se cancelarán.`,
-    confirmLabel: 'Quitar del mes',
-    onConfirm: async () => {
-      await toggleFixedActive(selectedFixed, false);
-      setConfirmDialog(null);
-      closeSheet();
-    }
-  });
 
   const markFixedPaid = () => {
     const remaining = Math.max(0, selectedFixed.amount - fixedPaidAmount(selectedFixed));
@@ -623,7 +651,7 @@ function AppContent() {
 
   const endPeriod = () => setConfirmDialog({
     title: 'Cerrar este sueldo',
-    message: `Guardaremos los pagos realizados y los pendientes en el historial. El siguiente plan comienza con su propio sueldo, sin trasladar dinero. Tus gastos habituales quedarán disponibles para elegir cuáles incluir.`,
+    message: `Guardaremos los pagos realizados y los pendientes en el historial. El siguiente plan comienza con su propio sueldo, sin trasladar dinero. Tus gastos fijos se repetirán con sus pagos reiniciados.`,
     confirmLabel: 'Cerrar plan',
     onConfirm: async () => {
       await Promise.all(data.fixed.flatMap((item) => (item.notificationIds || []).map((id) =>
@@ -631,20 +659,22 @@ function AppContent() {
       )));
       const nextMonth = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 1);
       const nextStart = new Date(nextMonth.getFullYear(), nextMonth.getMonth(), Math.min(data.payDay, new Date(nextMonth.getFullYear(), nextMonth.getMonth() + 1, 0).getDate()));
+      const nextFixed = [];
+      for (const item of data.fixed) {
+        const notificationIds = await schedulePaymentReminders(item.name, item.amount, item.dueDay, nextStart, item.paymentTiming || 'other');
+        nextFixed.push({ ...item, active: true, paid: false, paidAmount: 0, installmentAdvanced: false, notificationIds });
+      }
       setData((d) => ({
         ...d,
         carry: 0,
         activeCycleStart: nextStart.toISOString(),
         planningNext: true,
-        salaryReceived: false,
         periods: [{
           id: `${cycle.id}-${Date.now()}`, label: `Sueldo de ${budgetMonth} · ${shortDate(cycle.start)}`,
           income: totalBase, spent: paidFixed + variableSpent, saved: Math.max(0, totalBase - paidFixed - variableSpent),
           fixed: d.fixed.map((x) => ({ name: x.name, amount: x.amount, paidAmount: fixedPaidAmount(x), active: x.active !== false }))
         }, ...d.periods],
-        fixed: d.fixed.map((x) => ({
-          ...x, active: false, paid: false, paidAmount: 0, installmentAdvanced: false, notificationIds: []
-        }))
+        fixed: nextFixed
       }));
       setConfirmDialog(null);
       setTab('plan');
@@ -656,17 +686,15 @@ function AppContent() {
     <SafeAreaView style={styles.lock}>
       <Image source={require('./assets/finanzas-icon-v2.png')} style={styles.lockLogo} />
       <Text style={styles.lockTitle}>Tu dinero, solo tuyo.</Text>
-      <Text style={styles.lockText}>Flujo está protegido con la seguridad de tu teléfono.</Text>
-      <Pressable style={styles.primaryButton} onPress={unlock}>
-        <Icon name="finger-print" size={22} color={COLORS.bg} />
-        <Text style={styles.primaryText}>Desbloquear</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Desbloquear con huella" style={({ pressed }) => [styles.fingerprintButton, pressed && { opacity: .7, transform: [{ scale: .95 }] }]} onPress={unlock}>
+        <Icon name="finger-print" size={40} color={COLORS.mint} />
       </Pressable>
     </SafeAreaView>
   );
 
   const renderHome = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Header title="Tu próximo sueldo" subtitle={`SUELDO DE ${budgetMonth} · ${shortDate(cycle.start)}`} />
+      <View style={styles.homeHeading}><Text style={styles.homeTitle}>Finanzas Personales</Text><Image source={require('./assets/finanzas-icon-v2.png')} style={styles.logo} /></View>
       {!data.salary ? (
         <Pressable style={styles.welcome} onPress={() => setSheet('salary')}>
           <View style={styles.welcomeIcon}><Icon name="sparkles" size={22} color={COLORS.gold} /></View>
@@ -679,23 +707,24 @@ function AppContent() {
       ) : (
         <>
           <View style={styles.hero}>
-            <Text style={styles.heroLabel}>{data.salaryReceived ? 'TE QUEDA DESPUÉS DEL PLAN' : 'TE QUEDARÍA DESPUÉS DEL PLAN'}</Text>
+            <Text style={styles.heroLabel}>DISPONIBLE</Text>
             <Text style={styles.heroAmount}>{money(available)}</Text>
-            <View style={styles.progressBg}><View style={[styles.progress, { width: `${usedPct}%` }]} /></View>
-            <View style={styles.heroFoot}>
-              <Text style={styles.heroFootText}>{Math.round(usedPct)}% asignado</Text>
-              <Text style={styles.heroFootText}>{data.salaryReceived ? 'Sueldo recibido' : 'Proyección al cobrar'}</Text>
-            </View>
           </View>
-          <View style={styles.dailyCard}>
-            <View style={styles.dailyIcon}><Icon name="sunny-outline" size={24} color={COLORS.gold} /></View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.dailyLabel}>Necesitas para tus pagos</Text>
-              <Text style={styles.dailyAmount}>{money(fixedTotal)}</Text>
-              <Text style={styles.dailyHint}>{activeFixed.length} pagos en este sueldo · {money(pendingTotal)} por pagar.</Text>
+          {!!distribution.length && <View style={styles.distributionCard}>
+            <Text style={styles.distributionTitle}>Distribución del sueldo</Text>
+            <View accessible accessibilityLabel={distribution.map((part) => `${part.label}: ${part.percent.toFixed(1)} por ciento, ${money(part.amount)}`).join('. ')} style={styles.distributionBar}>
+              {distribution.map((part) => <View key={part.label} style={[styles.distributionSegment, { width: `${part.width}%`, backgroundColor: part.color }]}>
+              </View>)}
             </View>
-          </View>
-          {!data.salaryReceived && <Pressable style={styles.includeButton} onPress={() => setData((d) => ({ ...d, salaryReceived: true }))}><Text style={styles.editButtonText}>Ya recibí este sueldo</Text></Pressable>}
+            <View style={styles.distributionLegend}>
+              {distribution.map((part) => <View key={part.label} style={styles.distributionLegendItem}>
+                <View style={[styles.distributionDot, { backgroundColor: part.color }]} />
+                <View style={{ flexShrink: 1 }}><Text style={styles.distributionLabel}>{part.label}</Text><Text style={styles.distributionHint}>{Math.round(part.percent)}%</Text></View>
+              </View>)}
+            </View>
+            {available < 0 && <Text style={[styles.fixedHint, { color: COLORS.danger, marginTop: 10 }]}>Excedes tu ingreso en {money(-available)}. La barra se ajusta al total comprometido; los porcentajes se calculan sobre el ingreso.</Text>}
+            {available > 0 && <Text style={[styles.distributionHint, { marginTop: 8 }]}>El espacio sin color es el saldo libre. Porcentajes sobre tu ingreso.</Text>}
+          </View>}
           <View style={styles.row}>
             <Pressable style={styles.overviewTile} onPress={() => { setPlanFilter('pending'); setTab('plan'); }}>
               <Text style={styles.fixedHint}>POR PAGAR · {pendingFixed.length}</Text>
@@ -719,24 +748,6 @@ function AppContent() {
               <Icon name="chevron-forward" size={16} color={COLORS.muted} />
             </Pressable>
           ))}</View> : <Empty icon="checkmark" text="Todo al día. No tienes pagos pendientes incluidos en este mes." />}
-          <View style={styles.sectionTop}>
-            <Text style={styles.sectionTitle}>Resumen del período</Text>
-            <Pressable onPress={() => setTab('plan')}><Text style={styles.link}>Ver plan</Text></Pressable>
-          </View>
-          <View style={styles.summaryCard}>
-            {[
-              ['Gastos fijos', fixedTotal, 'home-outline', COLORS.gold],
-              ['Gastos variables', variableSpent, 'cart-outline', COLORS.danger],
-              ['Meta de ahorro', data.goal, 'leaf-outline', COLORS.mint]
-            ].map(([label, val, icon, color], index) => (
-              <Pressable style={styles.summaryRow} key={label} onPress={() => setTab(index === 1 ? 'moves' : 'plan')}>
-                <View style={[styles.smallIcon, { backgroundColor: color + '18' }]}><Icon name={icon} size={18} color={color} /></View>
-                <Text style={styles.summaryLabel}>{label}</Text>
-                <Text style={styles.summaryValue}>{money(val)}</Text>
-                <Icon name="chevron-forward" size={16} color={COLORS.muted} />
-              </Pressable>
-            ))}
-          </View>
         </>
       )}
       <View style={{ height: 110 }} />
@@ -746,7 +757,6 @@ function AppContent() {
   const renderPlan = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <Header title="Plan de pagos" subtitle={`SUELDO DE ${budgetMonth} · ${shortDate(cycle.start)}`} />
-      <Pressable style={styles.includeButton} onPress={() => { setAmount(formatMoneyInput(data.salary)); setDueDay(String(data.payDay)); setSheet('salary'); }}><Text style={styles.editButtonText}>Configurar sueldo y día de cobro</Text></Pressable>
       <View style={styles.planHero}>
         <Text style={styles.planHeroLabel}>POR PAGAR CON ESTE SUELDO</Text>
         <Text style={styles.planHeroValue}>{money(pendingTotal)}</Text>
@@ -755,19 +765,7 @@ function AppContent() {
       </View>
       <View style={styles.sectionTop}>
         <Text style={styles.sectionTitle}>Incluidos este mes</Text>
-        <Pressable style={styles.addMini} onPress={() => setSheet('fixed')}>
-          <Icon name="add" size={18} color={COLORS.bg} /><Text style={styles.addMiniText}>Nuevo</Text>
-        </Pressable>
       </View>
-      {data.planningNext && (
-        <View style={styles.planningNote}>
-          <Icon name="calendar" size={21} color={COLORS.mint} />
-          <Text style={styles.planningNoteText}>Prepara el sueldo de {budgetMonth}. Elige tus gastos habituales y revisa los importes antes de cobrar.</Text>
-        </View>
-      )}
-      <Pressable style={styles.includeButton} onPress={() => { setPickedFixed([]); setSheet('includeFixed'); }}>
-        <Icon name="add" size={20} color={COLORS.mint} /><Text style={styles.editButtonText}>Agregar gastos del mes ({inactiveFixed.length})</Text>
-      </Pressable>
       <View style={styles.planFilters}>
         {[['pending', 'Pendientes', pendingFixed.length], ['paid', 'Pagados', completedFixed.length], ['all', 'Todos', activeFixed.length]].map(([id, label, count]) => (
           <Pressable key={id} accessibilityRole="button" accessibilityState={{ selected: planFilter === id }} style={[styles.planFilter, planFilter === id && styles.chipOn]} onPress={() => setPlanFilter(id)}>
@@ -789,15 +787,16 @@ function AppContent() {
             return (
             <View key={item.id}>
             {(visibleFixed.indexOf(item) === 0 || paymentGroup(visibleFixed[visibleFixed.indexOf(item) - 1]) !== paymentGroup(item)) && <Text style={[styles.detailSectionLabel, { marginTop: 16 }]}>{paymentGroup(item)}</Text>}
-            <Pressable style={styles.compactPayment} onPress={() => openFixedPayment(item)}>
+            <Pressable style={[styles.compactPayment, { borderLeftWidth: 3, borderLeftColor: PAYMENT_CATEGORIES[item.category] || PAYMENT_CATEGORIES.Otros, paddingLeft: 10 }]} onPress={() => openFixedPayment(item)}>
               <View style={{ flex: 1 }}>
                 <Text numberOfLines={1} style={styles.fixedName}>{item.name}</Text>
-                <Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{shortDate(fixedDate(item))} · {paymentStatus(item).text}</Text>
+                <Text style={[styles.fixedHint, { color: PAYMENT_CATEGORIES[item.category] || PAYMENT_CATEGORIES.Otros }]}>{item.category || 'Otros'}</Text>
+                <Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{shortDate(fixedDate(item))}{paymentStatus(item).text.startsWith('Próximo') ? '' : ` · ${paymentStatus(item).text}`}</Text>
                 {installmentsLeft !== null && <Text style={styles.installmentText}>{installmentsLeft} cuotas pendientes</Text>}
               </View>
                 <View style={{ alignItems: 'flex-end' }}>
                   <Text style={styles.summaryValue}>{money(item.amount)}</Text>
-                  <Text style={[styles.remainingLabel, { color: completed ? COLORS.mint : COLORS.muted }]}>{completed ? 'Pagado' : `Pendiente ${money(remaining)}`}</Text>
+                  {(completed || itemPaid > 0) && <Text style={[styles.remainingLabel, { color: completed ? COLORS.mint : COLORS.muted }]}>{completed ? 'Pagado' : `Pendiente ${money(remaining)}`}</Text>}
                 </View>
               <Icon name="chevron-forward" size={16} color={COLORS.muted} />
             </Pressable>
@@ -849,13 +848,18 @@ function AppContent() {
       {!data.periods.length ? <Empty icon="bar-chart-outline" text="Tu primer resumen aparecerá cuando cierres el período." /> :
         data.periods.map((p) => (
           <View key={p.id} style={styles.periodCard}>
-            <Text style={styles.periodLabel}>{p.label}</Text>
+            <Pressable accessibilityRole="button" accessibilityState={{ expanded: expandedPeriods.includes(p.id) }} style={styles.historyHeading} onPress={() => setExpandedPeriods((ids) => ids.includes(p.id) ? ids.filter((id) => id !== p.id) : [...ids, p.id])}>
+              <View style={{ flex: 1 }}><Text style={styles.periodLabel}>{p.label}</Text><Text style={styles.fixedHint}>{expandedPeriods.includes(p.id) ? 'Ocultar detalle' : 'Ver detalle'}</Text></View>
+              <View style={{ transform: [{ rotate: expandedPeriods.includes(p.id) ? '90deg' : '0deg' }] }}><Icon name="chevron-forward" size={20} color={COLORS.muted} /></View>
+            </Pressable>
+            {expandedPeriods.includes(p.id) && <>
             <View style={styles.periodStats}>
               <Stat label="Ingresos" value={money(p.income)} />
               <Stat label="Gastado" value={money(p.spent)} />
             </View>
             <View style={styles.savedLine}><Text style={styles.savedLabel}>Sobrante y ahorro</Text><Text style={styles.savedValue}>{money(p.saved)}</Text></View>
             {(p.fixed || []).filter((item) => item.active !== false).map((item, index) => <View key={index} style={styles.compactPayment}><View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{money(item.paidAmount || 0)} pagados · {Math.max(0, item.amount - (item.paidAmount || 0)) ? 'Quedó pendiente' : 'Pagado'}</Text></View><Text style={styles.summaryValue}>{money(Math.max(0, item.amount - (item.paidAmount || 0)))}</Text></View>)}
+            </>}
           </View>
         ))
       }
@@ -902,7 +906,7 @@ function AppContent() {
                 style={[styles.dayCell, billsByDay[day]?.length && styles.dayCellDue, todayInCalendar === day && styles.dayCellToday, selectedCalendarDay === day && styles.dayCellSelected]}
               >
                 <Text style={[styles.dayNumber, billsByDay[day]?.length && styles.dayNumberDue, todayInCalendar === day && styles.dayNumberToday]}>{day}</Text>
-                {!!billsByDay[day]?.length && <View style={styles.calendarDot} />}
+                {!!billsByDay[day]?.length && <View style={styles.calendarDots}>{[...new Set(billsByDay[day].map((item) => normalizeCategory(item.category)))].slice(0, 4).map((label) => <View key={label} style={[styles.calendarDot, { backgroundColor: PAYMENT_CATEGORIES[label] }]} />)}</View>}
               </Pressable>
             ))}
           </View>
@@ -917,8 +921,8 @@ function AppContent() {
               const remaining = Math.max(0, item.amount - fixedPaidAmount(item));
               return (
                 <Pressable key={item.id} style={styles.calendarPreviewRow} onPress={() => openFixedPayment(item)}>
-                  <View style={styles.calendarPreviewIcon}><Icon name="receipt" size={19} color={COLORS.mint} /></View>
-                  <View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{remaining ? `${money(remaining)} pendientes` : 'Pagado'}</Text></View>
+                  <View style={[styles.calendarPreviewIcon, { backgroundColor: PAYMENT_CATEGORIES[normalizeCategory(item.category)] + '20' }]}><Icon name="receipt" size={19} color={PAYMENT_CATEGORIES[normalizeCategory(item.category)]} /></View>
+                  <View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{normalizeCategory(item.category)} · {remaining ? `${money(remaining)} pendientes` : 'Pagado'}</Text></View>
                   <Icon name="chevron-forward" size={18} color={COLORS.muted} />
                 </Pressable>
               );
@@ -928,9 +932,9 @@ function AppContent() {
         <Text style={[styles.sectionTitle, { marginTop: 24, marginBottom: 12 }]}>Próximos pagos</Text>
         {!upcoming.length ? <Empty icon="calendar" text="Agrega gastos fijos para ver sus fechas en el calendario." /> : upcoming.map((item) => {
           const remaining = Math.max(0, item.amount - fixedPaidAmount(item));
-          return <Pressable key={item.id} style={styles.calendarBill} onPress={() => openFixedPayment(item)}>
-            <View style={styles.calendarDate}><Text style={styles.calendarDateDay}>{fixedDate(item).getDate()}</Text><Text style={styles.calendarDateMonth}>{fixedDate(item).toLocaleDateString('es-CO',{month:'short'}).toUpperCase()}</Text></View>
-            <View style={{flex:1}}><Text style={styles.fixedName}>{item.name}</Text><Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{paymentStatus(item).text} · {money(remaining)}</Text></View>
+          return <Pressable key={item.id} style={[styles.calendarBill, { borderLeftWidth: 3, borderLeftColor: PAYMENT_CATEGORIES[normalizeCategory(item.category)], paddingLeft: 10 }]} onPress={() => openFixedPayment(item)}>
+            <View style={[styles.calendarDate, { backgroundColor: PAYMENT_CATEGORIES[normalizeCategory(item.category)] + '20' }]}><Text style={styles.calendarDateDay}>{fixedDate(item).getDate()}</Text><Text style={[styles.calendarDateMonth, { color: PAYMENT_CATEGORIES[normalizeCategory(item.category)] }]}>{fixedDate(item).toLocaleDateString('es-CO',{month:'short'}).toUpperCase()}</Text></View>
+            <View style={{flex:1}}><Text style={styles.fixedName}>{item.name}</Text><Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{normalizeCategory(item.category)} · {paymentStatus(item).text} · {money(remaining)}</Text></View>
             <Icon name="chevron-forward" size={19} color={COLORS.muted} />
           </Pressable>;
         })}
@@ -942,9 +946,9 @@ function AppContent() {
   const renderSettings = () => (
     <ScrollView contentContainerStyle={styles.content}>
       <Header title="Ajustes" subtitle="TU ESPACIO PRIVADO" />
-      <Pressable style={styles.settingRow} onPress={() => { setAmount(formatMoneyInput(data.salary)); setSheet('salary'); }}>
+      <Pressable style={styles.settingRow} onPress={() => { setAmount(formatMoneyInput(data.salary)); setDueDay(String(data.payDay)); setSheet('salary'); }}>
         <View style={styles.settingIcon}><Icon name="cash-outline" size={20} color={COLORS.gold} /></View>
-        <View style={{ flex: 1 }}><Text style={styles.fixedName}>Sueldo mensual</Text><Text style={styles.fixedHint}>{money(data.salary)}</Text></View>
+        <View style={{ flex: 1 }}><Text style={styles.fixedName}>Sueldo y día de cobro</Text><Text style={styles.fixedHint}>{money(data.salary)} · Día {data.payDay}</Text></View>
         <Icon name="chevron-forward" color={COLORS.muted} size={20} />
       </Pressable>
       <View style={styles.settingRow}>
@@ -977,38 +981,47 @@ function AppContent() {
 
   return (
     <View style={styles.app}>
-      {screens[tab]()}
+      {tab === 'moves' ? screens.moves() : <ScrollView ref={pageRef} horizontal pagingEnabled decelerationRate="fast" disableIntervalMomentum snapToInterval={screenWidth} nestedScrollEnabled directionalLockEnabled showsHorizontalScrollIndicator={false} scrollEnabled={!sheet && !fabOpen} style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }} onLayout={() => { pagePosition.current = Math.max(0, PAGE_ORDER.indexOf(tab)) * screenWidth; pageRef.current?.scrollTo({ x: pagePosition.current, animated: false }); }} onMomentumScrollEnd={(event) => { pagePosition.current = event.nativeEvent.contentOffset.x; const index = Math.max(0, Math.min(PAGE_ORDER.length - 1, Math.round(pagePosition.current / screenWidth))); React.startTransition(() => setTab(PAGE_ORDER[index])); }}>
+        {PAGE_ORDER.map((page) => <View key={page} style={{ width: screenWidth, flexShrink: 0, height: '100%' }} accessibilityElementsHidden={tab !== page} importantForAccessibility={tab === page ? 'auto' : 'no-hide-descendants'}>{screens[page]()}</View>)}
+      </ScrollView>}
       <View style={styles.nav}>
         {[
           ['inicio', 'home', 'Inicio'], ['plan', 'pie-chart', 'Plan'],
           ['calendar', 'calendar', 'Calendario'], ['history', 'time', 'Historial'], ['settings', 'settings', 'Ajustes']
         ].map(([key, icon, label]) => (
-          <Pressable key={key} style={styles.navItem} onPress={() => setTab(key)}>
+          <Pressable key={key} style={styles.navItem} onPress={() => { setFabOpen(false); setTab(key); }}>
             <Icon name={tab === key ? icon : `${icon}-outline`} size={22} color={tab === key ? COLORS.mint : COLORS.muted} />
             <Text style={[styles.navLabel, tab === key && styles.navLabelOn]}>{label}</Text>
           </Pressable>
         ))}
       </View>
-      {tab !== 'settings' && (
-        <Pressable style={styles.fab} onPress={() => setSheet('expense')}>
-          <Icon name="add" size={30} color={COLORS.bg} />
+      {tab !== 'settings' && <>
+        {fabOpen && <Pressable accessibilityLabel="Cerrar opciones" style={styles.fabBackdrop} onPress={() => setFabOpen(false)} />}
+        <Animated.View pointerEvents={fabOpen ? 'auto' : 'none'} accessibilityElementsHidden={!fabOpen} importantForAccessibility={fabOpen ? 'auto' : 'no-hide-descendants'} style={[styles.fabOptions, { opacity: fabProgress, transform: [{ translateY: fabProgress.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) }] }]}>
+          <Pressable accessibilityRole="button" style={styles.fabOption} onPress={() => { setFabOpen(false); closeSheet(); setSheet('fixed'); }}><Text style={styles.fabOptionLabel}>Gasto fijo</Text><View style={[styles.fabOptionIcon, { backgroundColor: COLORS.gold }]}><Icon name="receipt" size={22} color={COLORS.bg} /></View></Pressable>
+          <Pressable accessibilityRole="button" style={styles.fabOption} onPress={() => { setFabOpen(false); closeSheet(); setSheet('expense'); }}><Text style={styles.fabOptionLabel}>Gasto</Text><View style={styles.fabOptionIcon}><Icon name="cart" size={22} color={COLORS.bg} /></View></Pressable>
+        </Animated.View>
+        <Pressable accessibilityRole="button" accessibilityLabel={fabOpen ? 'Cerrar opciones de gasto' : 'Agregar gasto'} accessibilityState={{ expanded: fabOpen }} style={[styles.fab, { elevation: 12, zIndex: 12 }]} onPress={() => setFabOpen((open) => !open)}>
+          <Animated.View style={{ transform: [{ rotate: fabProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '45deg'] }) }] }}><Icon name="add" size={30} color={COLORS.bg} /></Animated.View>
         </Pressable>
-      )}
-
+      </>}
       <Sheet visible={sheet === 'expense' || sheet === 'editExpense'} onClose={closeSheet} title={sheet === 'editExpense' ? "Editar gasto" : "Registrar gasto"}>
         <MoneyField label="¿Cuánto gastaste?" value={amount} onChange={setAmount} />
         <Text style={styles.inputLabel}>Descripción opcional</Text>
         <TextInput value={name} onChangeText={setName} placeholder="Ej. Almuerzo" placeholderTextColor="#50677C" style={styles.textInput} />
         <Text style={styles.inputLabel}>Categoría</Text>
         <View style={styles.chips}>
-          {['Comida', 'Transporte', 'Ocio', 'Otros'].map((c) => <Pressable key={c} onPress={() => setCategory(c)} style={[styles.chip, category === c && styles.chipOn]}><Text style={[styles.chipText, category === c && styles.chipTextOn]}>{c}</Text></Pressable>)}
+          {Object.entries(PAYMENT_CATEGORIES).map(([label, color]) => <Pressable key={label} onPress={() => setCategory(label)} style={[styles.chip, { borderWidth: 1, borderColor: category === label ? color : COLORS.line, backgroundColor: category === label ? color + '25' : COLORS.card2 }]}><Text style={[styles.chipText, { color }]}>{label}</Text></Pressable>)}
         </View>
         <Pressable style={styles.primaryButton} onPress={sheet === 'editExpense' ? updateExpense : addExpense}><Text style={styles.primaryText}>{sheet === 'editExpense' ? 'Guardar cambios' : 'Guardar gasto'}</Text></Pressable>
       </Sheet>
       <Sheet visible={sheet === 'fixed' || sheet === 'editFixed'} onClose={closeSheet} title={sheet === 'editFixed' ? "Editar gasto fijo" : "Nuevo gasto fijo"}>
         <Text style={styles.inputLabel}>Nombre</Text>
-        <TextInput value={name} onChangeText={setName} placeholder="Ej. Arriendo" placeholderTextColor="#50677C" style={styles.textInput} />
+        <TextInput value={name} onChangeText={(value) => { setName(value); if (!categoryManuallySet) setFixedCategory(predictCategory(value)); }} placeholder="Ej. Arriendo" placeholderTextColor="#50677C" style={styles.textInput} />
         <MoneyField label="Valor mensual" value={amount} onChange={setAmount} />
+        <Text style={styles.inputLabel}>Tipo de gasto</Text>
+        <Text style={styles.sheetNote}>{categoryManuallySet ? 'Categoría elegida manualmente.' : `Categoría sugerida por el nombre: ${fixedCategory}. Puedes corregirla.`}</Text>
+        <View style={styles.chips}>{Object.entries(PAYMENT_CATEGORIES).map(([label, color]) => <Pressable key={label} style={[styles.chip, { borderWidth: 1, borderColor: fixedCategory === label ? color : COLORS.line, backgroundColor: fixedCategory === label ? color + '25' : COLORS.card2 }]} onPress={() => { setFixedCategory(label); setCategoryManuallySet(true); }}><Text style={[styles.chipText, { color }]}>{label}</Text></Pressable>)}</View>
         <Text style={styles.inputLabel}>Cuándo lo vas a pagar</Text>
         <View style={styles.chips}>{[['payday', 'Día del sueldo'], ['nextday', 'Día siguiente'], ['other', 'Otra fecha']].map(([id, label]) => <Pressable key={id} onPress={() => setPaymentTiming(id)} style={[styles.chip, paymentTiming === id && styles.chipOn]}><Text style={[styles.chipText, paymentTiming === id && styles.chipTextOn]}>{label}</Text></Pressable>)}</View>
         {paymentTiming === 'other' && <>
@@ -1072,21 +1085,6 @@ function AppContent() {
         </View>
         <Pressable style={styles.primaryButton} onPress={sheet === 'editFixed' ? updateFixed : addFixed}><Text style={styles.primaryText}>{sheet === 'editFixed' ? 'Guardar cambios' : 'Agregar al plan'}</Text></Pressable>
       </Sheet>
-      <Sheet visible={sheet === 'includeFixed'} onClose={() => { if (!addingFixed) closeSheet(); }} title="Agregar gastos del mes">
-        <Text style={styles.sheetNote}>Selecciona los gastos guardados que quieres incluir en {budgetMonth}. Puedes revisar o editar cada uno después.</Text>
-        {!inactiveFixed.length ? <Empty icon="checkmark" text="Todos tus gastos guardados ya están incluidos. Puedes crear uno nuevo desde Mi plan." /> : <>
-          <Pressable style={styles.editButton} disabled={addingFixed} onPress={() => setPickedFixed(pickedFixed.length === inactiveFixed.length ? [] : inactiveFixed.map((x) => x.id))}><Text style={styles.editButtonText}>{pickedFixed.length === inactiveFixed.length ? 'Quitar selección' : 'Seleccionar todos'}</Text></Pressable>
-          {inactiveFixed.map((item) => (
-            <Pressable key={item.id} disabled={addingFixed} accessibilityRole="checkbox" accessibilityState={{ checked: pickedFixed.includes(item.id) }} style={styles.compactPayment} onPress={() => setPickedFixed((ids) => ids.includes(item.id) ? ids.filter((id) => id !== item.id) : [...ids, item.id])}>
-              <View style={[styles.check, pickedFixed.includes(item.id) && styles.checkOn]}>{pickedFixed.includes(item.id) && <Icon name="checkmark" size={15} color={COLORS.bg} />}</View>
-              <View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{shortDate(fixedDate(item))}</Text></View>
-              <Text style={styles.summaryValue}>{money(item.amount)}</Text>
-            </Pressable>
-          ))}
-          <Text style={styles.paidLine}>{pickedFixed.length} seleccionados · {money(inactiveFixed.filter((x) => pickedFixed.includes(x.id)).reduce((sum, x) => sum + x.amount, 0))}</Text>
-          <Pressable disabled={addingFixed || !pickedFixed.length} style={[styles.primaryButton, (addingFixed || !pickedFixed.length) && { opacity: .45 }]} onPress={includePickedFixed}><Text style={styles.primaryText}>{addingFixed ? 'Agregando…' : `Agregar ${pickedFixed.length} al mes`}</Text></Pressable>
-        </>}
-      </Sheet>
       <Sheet visible={sheet === 'payFixed'} onClose={closeSheet} title={selectedFixed?.name || 'Detalle del gasto'}>
         {selectedFixed && <>
           <View style={styles.detailHeading}>
@@ -1095,18 +1093,8 @@ function AppContent() {
               {!!selectedFixed.deadlineDay && <Text style={styles.fixedHint}>Factura vence: {shortDate(planPaymentDate(cycle.start, { dueDay: selectedFixed.deadlineDay }))}</Text>}
               <Text style={styles.fixedHint}>{money(fixedPaidAmount(selectedFixed))} pagados</Text>
             </View>
-            <Pressable accessibilityLabel="Opciones del gasto" style={styles.detailMenuButton} onPress={() => setExpenseMenu((open) => !open)}><Icon name="options" size={24} color={COLORS.muted} /></Pressable>
+            <Pressable ref={expenseMenuRef} accessibilityRole="button" accessibilityLabel="Opciones del gasto" accessibilityState={{ expanded: expenseMenu }} style={styles.detailMenuButton} onPress={() => expenseMenuRef.current?.measureInWindow((x, y, width, height) => { setExpenseMenuAnchor({ x: Math.max(12, Math.min(screenWidth - 272, x + width - 260)), y: Math.max(12, Math.min(screenHeight - 180, y + height + 6)) }); setExpenseMenu(true); })}><Icon name="options" size={23} color={COLORS.text} /></Pressable>
           </View>
-          {expenseMenu && <View style={styles.detailPanel}>
-            <Pressable style={styles.editButton} onPress={openFixedEditor}><Icon name="edit" size={18} color={COLORS.mint} /><Text style={styles.editButtonText}>Editar gasto</Text></Pressable>
-            {selectedFixed.active !== false && <Pressable style={styles.editButton} onPress={removeFromMonth}><Text style={styles.editButtonText}>Quitar de este mes</Text></Pressable>}
-            <Pressable style={styles.deleteButton} onPress={deleteFixed}><Icon name="trash" size={18} color={COLORS.danger} /><Text style={styles.deleteButtonText}>Eliminar definitivamente</Text></Pressable>
-          </View>}
-          {selectedFixed.active === false && (
-            <View style={styles.activationRow}>
-              <Pressable onPress={() => toggleFixedActive(selectedFixed, true)}><Text style={styles.editButtonText}>Agregar a {budgetMonth}</Text></Pressable>
-            </View>
-          )}
           <View style={styles.paymentSummary}>
             <Stat label="Valor total" value={money(selectedFixed.amount)} />
             <Stat label="Pendiente" value={money(Math.max(0, selectedFixed.amount - fixedPaidAmount(selectedFixed)))} />
@@ -1145,6 +1133,15 @@ function AppContent() {
           )}
         </>}
       </Sheet>
+      <Modal visible={expenseMenu && sheet === 'payFixed'} transparent statusBarTranslucent animationType="fade" onRequestClose={() => setExpenseMenu(false)}>
+        <Pressable style={styles.expenseMenuOverlay} accessibilityLabel="Cerrar menú de opciones" onPress={() => setExpenseMenu(false)}>
+          <View accessibilityViewIsModal style={[styles.expensePopup, { top: expenseMenuAnchor.y, left: expenseMenuAnchor.x }]}>
+            <Pressable accessibilityRole="button" style={styles.expensePopupItem} onPress={() => { setExpenseMenu(false); openFixedEditor(); }}><Icon name="edit" size={21} color={COLORS.text} /><Text style={styles.expensePopupText}>Editar gasto</Text></Pressable>
+            <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: COLORS.line }} />
+            <Pressable accessibilityRole="button" style={styles.expensePopupItem} onPress={() => { setExpenseMenu(false); deleteFixed(); }}><Icon name="trash" size={21} color={COLORS.danger} /><Text style={[styles.expensePopupText, { color: COLORS.danger }]}>Eliminar gasto</Text></Pressable>
+          </View>
+        </Pressable>
+      </Modal>
       <Sheet visible={sheet === 'theme'} onClose={closeSheet} title="Elige tus colores">
         <View style={styles.themeGrid}>
           {Object.entries(THEMES).map(([key, palette]) => (
@@ -1207,13 +1204,15 @@ function createStyles(colors) {
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.bg },
   splashLogo: { width: 100, height: 100, borderRadius: 26 },
   content: { paddingHorizontal: 20, paddingTop: 16 },
+  homeHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 18 },
+  homeTitle: { flex: 1, color: COLORS.text, fontSize: 24, fontWeight: '800', letterSpacing: -.5 },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
   eyebrow: { color: COLORS.mint, fontSize: 11, letterSpacing: 1.7, fontWeight: '800', textTransform: 'uppercase', marginBottom: 4 },
   title: { color: COLORS.text, fontSize: 30, fontWeight: '800', letterSpacing: -1 },
   logo: { width: 44, height: 44, borderRadius: 14 },
-  hero: { backgroundColor: COLORS.card, borderRadius: 24, padding: 22, borderWidth: 1, borderColor: COLORS.line },
+  hero: { backgroundColor: COLORS.card, borderRadius: 20, paddingHorizontal: 20, paddingVertical: 14, borderWidth: 1, borderColor: COLORS.line },
   heroLabel: { color: COLORS.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1.1 },
-  heroAmount: { color: COLORS.text, fontSize: 37, fontWeight: '800', letterSpacing: -1.5, marginVertical: 14 },
+  heroAmount: { color: COLORS.text, fontSize: 32, fontWeight: '800', letterSpacing: -1, marginTop: 6 },
   progressBg: { height: 7, borderRadius: 9, backgroundColor: '#22384C', overflow: 'hidden' },
   progress: { height: 7, borderRadius: 9, backgroundColor: COLORS.mint },
   heroFoot: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
@@ -1241,11 +1240,16 @@ function createStyles(colors) {
   welcomeIcon: { width: 44, height: 44, borderRadius: 14, backgroundColor: '#F4C96B18', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
   welcomeTitle: { color: COLORS.text, fontSize: 16, fontWeight: '800' },
   welcomeText: { color: COLORS.muted, fontSize: 12, lineHeight: 18, marginTop: 4 },
-  nav: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 76, flexDirection: 'row', backgroundColor: '#0A1725F5', borderTopWidth: 1, borderColor: COLORS.line, paddingTop: 10 },
+  nav: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 60, flexDirection: 'row', backgroundColor: COLORS.card, borderTopWidth: 1, borderColor: COLORS.line, paddingTop: 8, paddingBottom: 6 },
   navItem: { flex: 1, alignItems: 'center', gap: 3 },
   navLabel: { color: COLORS.muted, fontSize: 9, fontWeight: '600' },
   navLabelOn: { color: COLORS.mint },
-  fab: { position: 'absolute', right: 20, bottom: 92, width: 58, height: 58, borderRadius: 20, backgroundColor: COLORS.mint, alignItems: 'center', justifyContent: 'center', shadowColor: COLORS.mint, shadowOpacity: .35, shadowRadius: 12, elevation: 8 },
+  fab: { position: 'absolute', right: 20, bottom: 76, width: 58, height: 58, borderRadius: 20, backgroundColor: COLORS.mint, alignItems: 'center', justifyContent: 'center', shadowColor: COLORS.mint, shadowOpacity: .35, shadowRadius: 12, elevation: 8 },
+  fabBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: '#00000055', elevation: 9, zIndex: 9 },
+  fabOptions: { position: 'absolute', right: 24, bottom: 150, gap: 14, elevation: 10, zIndex: 10 },
+  fabOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 12, minHeight: 48 },
+  fabOptionLabel: { color: COLORS.text, backgroundColor: COLORS.card, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, fontWeight: '700', fontSize: 14 },
+  fabOptionIcon: { width: 50, height: 50, borderRadius: 17, backgroundColor: COLORS.mint, alignItems: 'center', justifyContent: 'center' },
   overlay: { flex: 1, backgroundColor: '#00000099', justifyContent: 'flex-end' },
   sheetSafeArea: { flex: 1 },
   sheet: { maxHeight: '92%', backgroundColor: COLORS.card, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingTop: 12, paddingHorizontal: 22 },
@@ -1270,8 +1274,29 @@ function createStyles(colors) {
   reminderNote: { flexDirection: 'row', gap: 10, padding: 13, borderRadius: 13, backgroundColor: '#F4C96B10', marginBottom: 18 },
   reminderText: { flex: 1, color: COLORS.muted, fontSize: 11, lineHeight: 17 },
   planHero: { borderRadius: 22, padding: 20, backgroundColor: COLORS.card },
+  distributionCard: { marginTop: 14, marginBottom: 12, padding: 16, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, borderRadius: 20 },
+  distributionTitle: { color: COLORS.text, fontSize: 15, fontWeight: '700', marginBottom: 16 },
+  distributionBar: { height: 26, borderRadius: 15, overflow: 'hidden', flexDirection: 'row', backgroundColor: COLORS.line },
+  distributionSegment: { height: 26, justifyContent: 'center', alignItems: 'center', borderRightWidth: 1, borderRightColor: COLORS.card },
+  distributionPercent: { color: '#07111F', fontSize: 11, fontWeight: '800' },
+  distributionLegend: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 12, gap: 12 },
+  distributionLegendItem: { minWidth: '28%', flexDirection: 'row', gap: 6, alignItems: 'flex-start' },
+  distributionDot: { width: 10, height: 10, borderRadius: 5, marginTop: 3 },
+  distributionLabel: { color: COLORS.text, fontSize: 11 },
+  distributionHint: { color: COLORS.muted, fontSize: 11, marginTop: 2 },
+  budgetCard: { marginTop: 16, backgroundColor: COLORS.card, padding: 18, borderRadius: 22 },
+  budgetTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
+  budgetStrip: { flexDirection: 'row', overflow: 'hidden', borderRadius: 6 },
+  budgetTrack: { height: 8, borderRadius: 8, backgroundColor: COLORS.line },
+  budgetMarker: { position: 'absolute', top: -3, width: 2, height: 14, backgroundColor: COLORS.text },
+  historyHeading: { flexDirection: 'row', alignItems: 'center', minHeight: 52, gap: 12 },
+  choiceCard: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, borderRadius: 16, backgroundColor: COLORS.card2, marginBottom: 12, minHeight: 74 },
   detailHeading: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
-  detailMenuButton: { padding: 12, borderRadius: 12, backgroundColor: COLORS.card2 },
+  detailMenuButton: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.line },
+  expenseMenuOverlay: { flex: 1, backgroundColor: '#00000020' },
+  expensePopup: { position: 'absolute', width: 260, borderRadius: 16, backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.line, paddingVertical: 6, elevation: 16, shadowColor: '#000000', shadowOpacity: .3, shadowRadius: 16 },
+  expensePopupItem: { minHeight: 56, paddingHorizontal: 18, paddingVertical: 14, flexDirection: 'row', alignItems: 'center', gap: 14 },
+  expensePopupText: { fontSize: 15, fontWeight: '600', color: COLORS.text, flexShrink: 1 },
   detailPanel: { padding: 16, borderRadius: 18, backgroundColor: COLORS.card2, marginBottom: 18 },
   detailSectionLabel: { color: COLORS.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginBottom: 14 },
   overviewTile: { flex: 1, padding: 16, borderRadius: 18, backgroundColor: COLORS.card, gap: 8 },
@@ -1358,7 +1383,8 @@ function createStyles(colors) {
   dayNumber: { color: COLORS.muted, fontSize: 12, fontWeight: '700' },
   dayNumberDue: { color: COLORS.text, fontWeight: '900' },
   dayNumberToday: { color: COLORS.gold, fontWeight: '900' },
-  calendarDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: COLORS.mint, marginTop: 3 },
+  calendarDots: { flexDirection: 'row', gap: 3, marginTop: 3 },
+  calendarDot: { width: 5, height: 5, borderRadius: 3 },
   calendarPreview: { marginTop: 12, borderRadius: 20, padding: 15, backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.mint + '30' },
   calendarPreviewTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
   calendarPreviewEyebrow: { color: COLORS.mint, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
@@ -1385,6 +1411,7 @@ function createStyles(colors) {
   lock: { flex: 1, backgroundColor: COLORS.bg, alignItems: 'center', justifyContent: 'center', padding: 30 },
   lockLogo: { width: 100, height: 100, borderRadius: 28, marginBottom: 28 },
   lockTitle: { color: COLORS.text, fontSize: 26, fontWeight: '800' },
+  fingerprintButton: { marginTop: 28, width: 80, height: 80, borderRadius: 40, backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.mint + '55', alignItems: 'center', justifyContent: 'center' },
   lockText: { color: COLORS.muted, fontSize: 14, lineHeight: 21, textAlign: 'center', marginTop: 9, marginBottom: 28 }
   });
 }
