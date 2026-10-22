@@ -77,6 +77,7 @@ const seed = {
   periods: [],
   activeCycleStart: null,
   planningNext: false
+  , payDay: 31, salaryReceived: false, salaryPlanVersion: 1
 };
 
 const copFormatter = new Intl.NumberFormat('es-CO', {
@@ -115,6 +116,12 @@ function cycleFor(date = new Date(), forcedStart = null) {
 }
 
 const shortDate = (d) => d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+const planPaymentDate = (start, item) => {
+  if (item.paymentTiming === 'payday') return new Date(start);
+  if (item.paymentTiming === 'nextday') return new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+  const month = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+  return new Date(month.getFullYear(), month.getMonth(), Math.min(item.dueDay || 1, new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()));
+};
 const daysBetween = (a, b) => Math.max(1, Math.ceil((b - a) / 86400000) + 1);
 
 const Header = React.memo(function Header({ title, subtitle }) {
@@ -216,11 +223,16 @@ function AppContent() {
   const [planSearch, setPlanSearch] = useState('');
   const [pickedFixed, setPickedFixed] = useState([]);
   const [addingFixed, setAddingFixed] = useState(false);
+  const [paymentAction, setPaymentAction] = useState(null);
+  const [expenseMenu, setExpenseMenu] = useState(false);
+  const [paymentTiming, setPaymentTiming] = useState('payday');
+  const [deadlineDay, setDeadlineDay] = useState('');
+  const [calendarOffset, setCalendarOffset] = useState(1);
   const cycle = cycleFor(new Date(), data.activeCycleStart);
   const activeTheme = THEMES[data.theme] || THEMES.menta;
   Object.assign(COLORS, activeTheme);
   styles = createStyles(activeTheme);
-  const budgetMonth = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 1)
+  const budgetMonth = new Date(cycle.start.getFullYear(), cycle.start.getMonth(), 1)
     .toLocaleDateString('es-CO', { month: 'long', year: 'numeric' });
 
   useEffect(() => {
@@ -232,6 +244,11 @@ function AppContent() {
     });
     AsyncStorage.getItem(STORE_KEY).then(async (raw) => {
       const saved = raw ? { ...seed, ...JSON.parse(raw) } : seed;
+      if (!saved.activeCycleStart) {
+        const base = raw ? cycleFor(new Date()).start : new Date();
+        saved.activeCycleStart = new Date(base.getFullYear(), base.getMonth(), Math.min(saved.payDay, new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate())).toISOString();
+      }
+      if (raw && !JSON.parse(raw).salaryPlanVersion) saved.salaryReceived = new Date(saved.activeCycleStart) <= new Date();
       setData(saved);
       setLoaded(true);
       if (saved.biometric) {
@@ -274,10 +291,21 @@ function AppContent() {
   const remainingDays = daysBetween(spendingStart, cycle.end);
   const daily = Math.max(0, available / remainingDays);
   const fixedDate = (item) => {
-    const month = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 1);
-    const last = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
-    return new Date(month.getFullYear(), month.getMonth(), Math.min(item.dueDay || last, last));
+    return planPaymentDate(cycle.start, item);
   };
+  const paymentStatus = (item) => {
+    if (item.active === false) return { text: 'Sin incluir', color: COLORS.muted };
+    if (fixedPaidAmount(item) >= item.amount) return { text: 'Pagado', color: COLORS.mint };
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const date = fixedDate(item); date.setHours(0, 0, 0, 0);
+    const deadline = item.deadlineDay ? planPaymentDate(cycle.start, { dueDay: item.deadlineDay }) : null;
+    const partial = fixedPaidAmount(item) > 0 ? ' · Pago parcial' : '';
+    if (deadline && deadline < today) return { text: 'Factura vencida' + partial, color: COLORS.danger };
+    if (date < today) return { text: (deadline ? 'Pago planeado atrasado' : 'Vencido') + partial, color: COLORS.danger };
+    if (+date === +today) return { text: 'Hoy' + partial, color: COLORS.gold };
+    return { text: 'Próximo' + partial, color: '#72B8FF' };
+  };
+  const paymentGroup = (item) => +fixedDate(item) === +new Date(cycle.start.getFullYear(), cycle.start.getMonth(), cycle.start.getDate()) ? 'Día del sueldo' : +fixedDate(item) === +new Date(cycle.start.getFullYear(), cycle.start.getMonth(), cycle.start.getDate() + 1) ? 'Día siguiente' : 'Otras fechas';
   const pendingFixed = activeFixed.filter((item) => fixedPaidAmount(item) < item.amount)
     .sort((a, b) => fixedDate(a) - fixedDate(b) || a.name.localeCompare(b.name));
   const completedFixed = activeFixed.filter((item) => fixedPaidAmount(item) >= item.amount);
@@ -287,13 +315,15 @@ function AppContent() {
   const pendingTotal = Math.max(0, fixedTotal - paidFixed);
 
   const closeSheet = () => {
+    setPaymentAction(null); setExpenseMenu(false);
+    setPaymentTiming('payday'); setDeadlineDay('');
     setSheet(null); setAmount(''); setName(''); setDueDay(''); setCategory('Comida');
     setInstallmentsTotal(''); setInstallmentsPaid(''); setSelectedFixed(null); setSelectedExpense(null);
     setPaymentUrl('');
     setPaymentReference('');
   };
 
-  const schedulePaymentReminders = async (expenseName, value, day, cycleStart = cycle.start) => {
+  const schedulePaymentReminders = async (expenseName, value, day, cycleStart = cycle.start, timing = 'other') => {
     const permission = await Notifications.requestPermissionsAsync();
     if (permission.status !== 'granted') {
       Alert.alert('Recordatorios desactivados', 'Puedes activar las notificaciones de Flujo desde los ajustes del teléfono.');
@@ -301,16 +331,15 @@ function AppContent() {
     }
     const ids = [];
     const now = new Date();
-    const base = new Date(cycleStart.getFullYear(), cycleStart.getMonth() + 1, 1);
-    const lastDay = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
-    const paymentDate = new Date(base.getFullYear(), base.getMonth(), Math.min(day, lastDay), 9, 0, 0);
+    const paymentDate = planPaymentDate(cycleStart, { dueDay: day, paymentTiming: timing });
+    paymentDate.setHours(9, 0, 0, 0);
     for (const daysBefore of [1, 0]) {
       const triggerDate = new Date(paymentDate);
       triggerDate.setDate(triggerDate.getDate() - daysBefore);
       if (triggerDate <= now) continue;
       const id = await Notifications.scheduleNotificationAsync({
         content: {
-          title: daysBefore ? `Mañana vence ${expenseName}` : `Hoy vence ${expenseName}`,
+          title: daysBefore ? `Mañana paga ${expenseName}` : `Hoy paga ${expenseName}`,
           body: `Pago programado por ${money(value)}.`,
           sound: 'default',
           data: { type: 'payment', expenseName, period: `${cycleStart.getFullYear()}-${cycleStart.getMonth() + 1}` }
@@ -357,7 +386,7 @@ function AppContent() {
 
   const addFixed = async () => {
     const value = parseMoney(amount);
-    const day = Number(dueDay);
+    const day = paymentTiming === 'other' ? Number(dueDay) : 1;
     const totalInstallments = Number(installmentsTotal) || 0;
     const alreadyPaid = Number(installmentsPaid) || 0;
     if (!value || !name.trim() || day < 1 || day > 31) {
@@ -366,11 +395,12 @@ function AppContent() {
     if (totalInstallments && alreadyPaid >= totalInstallments) {
       return Alert.alert('Revisa las cuotas', 'Las cuotas pagadas deben ser menores al total.');
     }
-    const notificationIds = await schedulePaymentReminders(name.trim(), value, day);
+    if (deadlineDay && (Number(deadlineDay) < 1 || Number(deadlineDay) > 31)) return Alert.alert('Revisa el vencimiento', 'Usa un día entre 1 y 31.');
+    const notificationIds = await schedulePaymentReminders(name.trim(), value, day, cycle.start, paymentTiming);
     setData((d) => ({
       ...d, fixed: [...d.fixed, {
         id: Date.now().toString(), name: name.trim(), amount: value,
-        dueDay: day, paid: false, paidAmount: 0, notificationIds, active: true,
+        dueDay: day, paymentTiming, deadlineDay: Number(deadlineDay) || null, paid: false, paidAmount: 0, notificationIds, active: true,
         installmentsTotal: totalInstallments, installmentsPaid: alreadyPaid,
         installmentAdvanced: false, paymentUrl: paymentUrl.trim(),
         paymentReference: paymentReference.trim()
@@ -384,6 +414,7 @@ function AppContent() {
     setName(selectedFixed.name || '');
     setAmount(formatMoneyInput(selectedFixed.amount));
     setDueDay(String(selectedFixed.dueDay || ''));
+    setPaymentTiming(selectedFixed.paymentTiming || 'other'); setDeadlineDay(selectedFixed.deadlineDay ? String(selectedFixed.deadlineDay) : '');
     setInstallmentsTotal(selectedFixed.installmentsTotal ? String(selectedFixed.installmentsTotal) : '');
     setInstallmentsPaid(selectedFixed.installmentsPaid ? String(selectedFixed.installmentsPaid) : '');
     setPaymentUrl(selectedFixed.paymentUrl || '');
@@ -393,7 +424,7 @@ function AppContent() {
 
   const updateFixed = async () => {
     const value = parseMoney(amount);
-    const day = Number(dueDay);
+    const day = paymentTiming === 'other' ? Number(dueDay) : 1;
     const totalInstallments = Number(installmentsTotal) || 0;
     const alreadyPaid = Number(installmentsPaid) || 0;
     if (!selectedFixed || !value || !name.trim() || day < 1 || day > 31) {
@@ -402,16 +433,17 @@ function AppContent() {
     if (totalInstallments && alreadyPaid >= totalInstallments) {
       return Alert.alert('Revisa las cuotas', 'Las cuotas pagadas deben ser menores al total.');
     }
+    if (deadlineDay && (Number(deadlineDay) < 1 || Number(deadlineDay) > 31)) return Alert.alert('Revisa el vencimiento', 'Usa un día entre 1 y 31.');
     await Promise.all((selectedFixed.notificationIds || []).map((id) =>
       Notifications.cancelScheduledNotificationAsync(id).catch(() => {})
     ));
     const notificationIds = selectedFixed.active === false
       ? []
-      : await schedulePaymentReminders(name.trim(), value, day);
+      : await schedulePaymentReminders(name.trim(), value, day, cycle.start, paymentTiming);
     setData((d) => ({
       ...d,
       fixed: d.fixed.map((item) => item.id === selectedFixed.id ? {
-        ...item, name: name.trim(), amount: value, dueDay: day,
+        ...item, name: name.trim(), amount: value, dueDay: day, paymentTiming, deadlineDay: Number(deadlineDay) || null,
         paidAmount: Math.min(item.paidAmount || 0, value),
         paid: (item.paidAmount || 0) >= value,
         installmentsTotal: totalInstallments, installmentsPaid: alreadyPaid,
@@ -421,10 +453,18 @@ function AppContent() {
     closeSheet();
   };
 
-  const saveSetup = () => {
+  const saveSetup = async () => {
     const value = parseMoney(amount);
     if (!value) return Alert.alert('Falta tu sueldo', 'Ingresa el sueldo del período.');
-    setData((d) => ({ ...d, salary: value }));
+    const payday = Number(dueDay) || data.payDay;
+    const start = new Date(cycle.start.getFullYear(), cycle.start.getMonth(), Math.min(payday, new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 0).getDate()));
+    const updatedFixed = [];
+    for (const item of data.fixed) {
+      await Promise.all((item.notificationIds || []).map((id) => Notifications.cancelScheduledNotificationAsync(id).catch(() => {})));
+      const notificationIds = item.active === false || fixedPaidAmount(item) >= item.amount ? [] : await schedulePaymentReminders(item.name, item.amount, item.dueDay, start, item.paymentTiming || 'other');
+      updatedFixed.push({ ...item, notificationIds });
+    }
+    setData((d) => ({ ...d, salary: value, payDay: payday, activeCycleStart: start.toISOString(), fixed: updatedFixed }));
     closeSheet();
   };
 
@@ -439,7 +479,7 @@ function AppContent() {
       Notifications.cancelScheduledNotificationAsync(id).catch(() => {})
     ));
     const notificationIds = enabled
-      ? await schedulePaymentReminders(item.name, item.amount, item.dueDay)
+      ? await schedulePaymentReminders(item.name, item.amount, item.dueDay, cycle.start, item.paymentTiming || 'other')
       : [];
     setData((d) => ({
       ...d,
@@ -522,6 +562,22 @@ function AppContent() {
     closeSheet();
   };
 
+  const correctFixedPayment = () => {
+    const value = parseMoney(amount);
+    if (!selectedFixed) return;
+    if (value > selectedFixed.amount) return Alert.alert('Monto no válido', 'El total pagado no puede superar el valor del gasto.');
+    setData((d) => ({ ...d, fixed: d.fixed.map((x) => {
+      if (x.id !== selectedFixed.id) return x;
+      const completed = value >= x.amount;
+      const baseInstallments = Math.max(0, (x.installmentsPaid || 0) - (x.installmentAdvanced ? 1 : 0));
+      const advance = Boolean(completed && x.installmentsTotal && baseInstallments < x.installmentsTotal);
+      return { ...x, paidAmount: value, paid: completed,
+        installmentsPaid: x.installmentsTotal ? baseInstallments + (advance ? 1 : 0) : (x.installmentsPaid || 0),
+        installmentAdvanced: advance };
+    }) }));
+    closeSheet();
+  };
+
   const openPaymentUrl = async (rawUrl) => {
     if (!rawUrl) return;
     const url = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
@@ -566,22 +622,24 @@ function AppContent() {
   });
 
   const endPeriod = () => setConfirmDialog({
-    title: 'Cerrar y planificar el siguiente',
-    message: `Guardaremos en el historial que sobraron ${money(Math.max(0, available))}. El siguiente período comenzará solo con el sueldo que configures. Tus gastos fijos quedarán disponibles, pero desactivados para que elijas cuáles incluir.`,
-    confirmLabel: 'Cerrar período',
+    title: 'Cerrar este sueldo',
+    message: `Guardaremos los pagos realizados y los pendientes en el historial. El siguiente plan comienza con su propio sueldo, sin trasladar dinero. Tus gastos habituales quedarán disponibles para elegir cuáles incluir.`,
+    confirmLabel: 'Cerrar plan',
     onConfirm: async () => {
       await Promise.all(data.fixed.flatMap((item) => (item.notificationIds || []).map((id) =>
         Notifications.cancelScheduledNotificationAsync(id).catch(() => {})
       )));
-      const nextStart = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 2, 0);
+      const nextMonth = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 1);
+      const nextStart = new Date(nextMonth.getFullYear(), nextMonth.getMonth(), Math.min(data.payDay, new Date(nextMonth.getFullYear(), nextMonth.getMonth() + 1, 0).getDate()));
       setData((d) => ({
         ...d,
         carry: 0,
         activeCycleStart: nextStart.toISOString(),
         planningNext: true,
+        salaryReceived: false,
         periods: [{
-          id: `${cycle.id}-${Date.now()}`, label: `${shortDate(cycle.start)} — ${shortDate(cycle.end)}`,
-          income: totalBase, spent: fixedTotal + variableSpent, saved: Math.max(0, available) + d.goal,
+          id: `${cycle.id}-${Date.now()}`, label: `Sueldo de ${budgetMonth} · ${shortDate(cycle.start)}`,
+          income: totalBase, spent: paidFixed + variableSpent, saved: Math.max(0, totalBase - paidFixed - variableSpent),
           fixed: d.fixed.map((x) => ({ name: x.name, amount: x.amount, paidAmount: fixedPaidAmount(x), active: x.active !== false }))
         }, ...d.periods],
         fixed: d.fixed.map((x) => ({
@@ -608,35 +666,36 @@ function AppContent() {
 
   const renderHome = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Header title="Tu mes, en orden" subtitle={`PRESUPUESTO DE ${budgetMonth}`} />
+      <Header title="Tu próximo sueldo" subtitle={`SUELDO DE ${budgetMonth} · ${shortDate(cycle.start)}`} />
       {!data.salary ? (
         <Pressable style={styles.welcome} onPress={() => setSheet('salary')}>
           <View style={styles.welcomeIcon}><Icon name="sparkles" size={22} color={COLORS.gold} /></View>
           <View style={{ flex: 1 }}>
             <Text style={styles.welcomeTitle}>Comienza con tu sueldo</Text>
-            <Text style={styles.welcomeText}>Configura el dinero que recibiste para organizar este período.</Text>
+            <Text style={styles.welcomeText}>Configura el sueldo esperado y prepara los pagos que harás al cobrar.</Text>
           </View>
           <Icon name="chevron-forward" size={20} color={COLORS.muted} />
         </Pressable>
       ) : (
         <>
           <View style={styles.hero}>
-            <Text style={styles.heroLabel}>DISPONIBLE HASTA EL {cycle.end.getDate()}</Text>
+            <Text style={styles.heroLabel}>{data.salaryReceived ? 'TE QUEDA DESPUÉS DEL PLAN' : 'TE QUEDARÍA DESPUÉS DEL PLAN'}</Text>
             <Text style={styles.heroAmount}>{money(available)}</Text>
             <View style={styles.progressBg}><View style={[styles.progress, { width: `${usedPct}%` }]} /></View>
             <View style={styles.heroFoot}>
               <Text style={styles.heroFootText}>{Math.round(usedPct)}% asignado</Text>
-              <Text style={styles.heroFootText}>{remainingDays} días restantes</Text>
+              <Text style={styles.heroFootText}>{data.salaryReceived ? 'Sueldo recibido' : 'Proyección al cobrar'}</Text>
             </View>
           </View>
           <View style={styles.dailyCard}>
             <View style={styles.dailyIcon}><Icon name="sunny-outline" size={24} color={COLORS.gold} /></View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.dailyLabel}>{new Date() < cycle.start ? `Presupuesto diario desde el ${shortDate(cycle.start)}` : 'Puedes gastar hoy'}</Text>
-              <Text style={styles.dailyAmount}>{money(daily)}</Text>
-              <Text style={styles.dailyHint}>Disponible ÷ {remainingDays} días, después de gastos fijos y ahorro.</Text>
+              <Text style={styles.dailyLabel}>Necesitas para tus pagos</Text>
+              <Text style={styles.dailyAmount}>{money(fixedTotal)}</Text>
+              <Text style={styles.dailyHint}>{activeFixed.length} pagos en este sueldo · {money(pendingTotal)} por pagar.</Text>
             </View>
           </View>
+          {!data.salaryReceived && <Pressable style={styles.includeButton} onPress={() => setData((d) => ({ ...d, salaryReceived: true }))}><Text style={styles.editButtonText}>Ya recibí este sueldo</Text></Pressable>}
           <View style={styles.row}>
             <Pressable style={styles.overviewTile} onPress={() => { setPlanFilter('pending'); setTab('plan'); }}>
               <Text style={styles.fixedHint}>POR PAGAR · {pendingFixed.length}</Text>
@@ -655,7 +714,7 @@ function AppContent() {
           </View>
           {pendingFixed.length ? <View style={styles.summaryCard}>{pendingFixed.slice(0, 3).map((item) => (
             <Pressable key={item.id} style={styles.compactPayment} onPress={() => openFixedPayment(item)}>
-              <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{shortDate(fixedDate(item))} · {fixedDate(item) < new Date(new Date().setHours(0, 0, 0, 0)) ? 'Vencido' : 'Pendiente'}</Text></View>
+              <View style={{ flex: 1 }}><Text numberOfLines={1} style={styles.fixedName}>{item.name}</Text><Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{shortDate(fixedDate(item))} · {paymentStatus(item).text}</Text></View>
               <Text style={styles.summaryValue}>{money(item.amount - fixedPaidAmount(item))}</Text>
               <Icon name="chevron-forward" size={16} color={COLORS.muted} />
             </Pressable>
@@ -686,9 +745,10 @@ function AppContent() {
 
   const renderPlan = () => (
     <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Header title="Mi plan" subtitle={budgetMonth.toLocaleUpperCase()} />
+      <Header title="Plan de pagos" subtitle={`SUELDO DE ${budgetMonth} · ${shortDate(cycle.start)}`} />
+      <Pressable style={styles.includeButton} onPress={() => { setAmount(formatMoneyInput(data.salary)); setDueDay(String(data.payDay)); setSheet('salary'); }}><Text style={styles.editButtonText}>Configurar sueldo y día de cobro</Text></Pressable>
       <View style={styles.planHero}>
-        <Text style={styles.planHeroLabel}>POR PAGAR ESTE MES</Text>
+        <Text style={styles.planHeroLabel}>POR PAGAR CON ESTE SUELDO</Text>
         <Text style={styles.planHeroValue}>{money(pendingTotal)}</Text>
         <Text style={styles.planHeroSub}>{pendingFixed.length} pendientes · {money(paidFixed)} abonados</Text>
         <View style={styles.progressBg}><View style={[styles.progress, { width: `${fixedTotal ? Math.min(100, paidFixed / fixedTotal * 100) : 0}%` }]} /></View>
@@ -702,7 +762,7 @@ function AppContent() {
       {data.planningNext && (
         <View style={styles.planningNote}>
           <Icon name="calendar" size={21} color={COLORS.mint} />
-          <Text style={styles.planningNoteText}>Estás preparando {budgetMonth}. Agrega tus gastos guardados para organizar los pagos del mes.</Text>
+          <Text style={styles.planningNoteText}>Prepara el sueldo de {budgetMonth}. Elige tus gastos habituales y revisa los importes antes de cobrar.</Text>
         </View>
       )}
       <Pressable style={styles.includeButton} onPress={() => { setPickedFixed([]); setSheet('includeFixed'); }}>
@@ -727,10 +787,12 @@ function AppContent() {
               ? Math.max(0, item.installmentsTotal - (item.installmentsPaid || 0))
               : null;
             return (
-            <Pressable key={item.id} style={styles.compactPayment} onPress={() => openFixedPayment(item)}>
+            <View key={item.id}>
+            {(visibleFixed.indexOf(item) === 0 || paymentGroup(visibleFixed[visibleFixed.indexOf(item) - 1]) !== paymentGroup(item)) && <Text style={[styles.detailSectionLabel, { marginTop: 16 }]}>{paymentGroup(item)}</Text>}
+            <Pressable style={styles.compactPayment} onPress={() => openFixedPayment(item)}>
               <View style={{ flex: 1 }}>
                 <Text numberOfLines={1} style={styles.fixedName}>{item.name}</Text>
-                <Text style={[styles.fixedHint, !completed && fixedDate(item) < new Date(new Date().setHours(0, 0, 0, 0)) && { color: COLORS.danger }]}>{shortDate(fixedDate(item))} · {completed ? 'Pagado' : fixedDate(item) < new Date(new Date().setHours(0, 0, 0, 0)) ? 'Vencido' : itemPaid ? 'Pago parcial' : 'Pendiente'}</Text>
+                <Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{shortDate(fixedDate(item))} · {paymentStatus(item).text}</Text>
                 {installmentsLeft !== null && <Text style={styles.installmentText}>{installmentsLeft} cuotas pendientes</Text>}
               </View>
                 <View style={{ alignItems: 'flex-end' }}>
@@ -739,6 +801,7 @@ function AppContent() {
                 </View>
               <Icon name="chevron-forward" size={16} color={COLORS.muted} />
             </Pressable>
+            </View>
           )})}
           <Text style={styles.paidLine}>{money(paidFixed)} pagados de {money(fixedTotal)}</Text>
         </View>
@@ -749,7 +812,7 @@ function AppContent() {
         <View style={{ flex: 1 }}><Text style={styles.fixedName}>Mi colchón</Text><Text style={styles.fixedHint}>Separado antes de gastar</Text></View>
         <Text style={styles.goalValue}>{money(data.goal)}</Text>
       </Pressable>
-      <Pressable style={styles.outlineButton} onPress={endPeriod}><Text style={styles.outlineText}>Cerrar período</Text></Pressable>
+      <Pressable style={styles.outlineButton} onPress={endPeriod}><Text style={styles.outlineText}>Cerrar sueldo y preparar el siguiente</Text></Pressable>
       <View style={{ height: 110 }} />
     </ScrollView>
   );
@@ -791,7 +854,8 @@ function AppContent() {
               <Stat label="Ingresos" value={money(p.income)} />
               <Stat label="Gastado" value={money(p.spent)} />
             </View>
-            <View style={styles.savedLine}><Text style={styles.savedLabel}>Ahorrado y trasladado</Text><Text style={styles.savedValue}>{money(p.saved)}</Text></View>
+            <View style={styles.savedLine}><Text style={styles.savedLabel}>Sobrante y ahorro</Text><Text style={styles.savedValue}>{money(p.saved)}</Text></View>
+            {(p.fixed || []).filter((item) => item.active !== false).map((item, index) => <View key={index} style={styles.compactPayment}><View style={{ flex: 1 }}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{money(item.paidAmount || 0)} pagados · {Math.max(0, item.amount - (item.paidAmount || 0)) ? 'Quedó pendiente' : 'Pagado'}</Text></View><Text style={styles.summaryValue}>{money(Math.max(0, item.amount - (item.paidAmount || 0)))}</Text></View>)}
           </View>
         ))
       }
@@ -800,7 +864,7 @@ function AppContent() {
   );
 
   const renderCalendar = () => {
-    const monthDate = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + 1, 1);
+    const monthDate = new Date(cycle.start.getFullYear(), cycle.start.getMonth() + calendarOffset, 1);
     const year = monthDate.getFullYear();
     const month = monthDate.getMonth();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -808,16 +872,19 @@ function AppContent() {
     const today = new Date();
     const todayInCalendar = today.getFullYear() === year && today.getMonth() === month ? today.getDate() : null;
     const billsByDay = activeFixed.reduce((acc, item) => {
-      const day = Math.min(item.dueDay || 1, daysInMonth);
+      const date = fixedDate(item);
+      if (date.getFullYear() !== year || date.getMonth() !== month) return acc;
+      const day = date.getDate();
       (acc[day] ||= []).push(item);
       return acc;
     }, {});
-    const upcoming = [...activeFixed].sort((a, b) => (a.dueDay || 32) - (b.dueDay || 32));
+    const upcoming = [...activeFixed].sort((a, b) => fixedDate(a) - fixedDate(b));
     const selectedDayBills = selectedCalendarDay ? (billsByDay[selectedCalendarDay] || []) : [];
     const todayLabel = today.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' }).toUpperCase();
     return (
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Header title="Calendario" subtitle={`PAGOS DE ${budgetMonth}`} />
+        <Header title="Calendario" subtitle={`SUELDO DE ${budgetMonth}`} />
+        <View style={styles.chips}>{[0, 1].map((offset) => <Pressable key={offset} onPress={() => { setCalendarOffset(offset); setSelectedCalendarDay(null); }} style={[styles.chip, calendarOffset === offset && styles.chipOn]}><Text style={[styles.chipText, calendarOffset === offset && styles.chipTextOn]}>{new Date(cycle.start.getFullYear(), cycle.start.getMonth() + offset, 1).toLocaleDateString('es-CO', { month: 'long' })}</Text></Pressable>)}</View>
         <View style={styles.todayPill}>
           <View style={styles.todayPillDot} />
           <Text style={styles.todayPillText}>HOY · {todayLabel}</Text>
@@ -862,8 +929,8 @@ function AppContent() {
         {!upcoming.length ? <Empty icon="calendar" text="Agrega gastos fijos para ver sus fechas en el calendario." /> : upcoming.map((item) => {
           const remaining = Math.max(0, item.amount - fixedPaidAmount(item));
           return <Pressable key={item.id} style={styles.calendarBill} onPress={() => openFixedPayment(item)}>
-            <View style={styles.calendarDate}><Text style={styles.calendarDateDay}>{item.dueDay}</Text><Text style={styles.calendarDateMonth}>{monthDate.toLocaleDateString('es-CO',{month:'short'}).toUpperCase()}</Text></View>
-            <View style={{flex:1}}><Text style={styles.fixedName}>{item.name}</Text><Text style={styles.fixedHint}>{remaining ? `${money(remaining)} pendientes` : 'Pagado'}</Text></View>
+            <View style={styles.calendarDate}><Text style={styles.calendarDateDay}>{fixedDate(item).getDate()}</Text><Text style={styles.calendarDateMonth}>{fixedDate(item).toLocaleDateString('es-CO',{month:'short'}).toUpperCase()}</Text></View>
+            <View style={{flex:1}}><Text style={styles.fixedName}>{item.name}</Text><Text style={[styles.fixedHint, { color: paymentStatus(item).color }]}>{paymentStatus(item).text} · {money(remaining)}</Text></View>
             <Icon name="chevron-forward" size={19} color={COLORS.muted} />
           </Pressable>;
         })}
@@ -942,7 +1009,10 @@ function AppContent() {
         <Text style={styles.inputLabel}>Nombre</Text>
         <TextInput value={name} onChangeText={setName} placeholder="Ej. Arriendo" placeholderTextColor="#50677C" style={styles.textInput} />
         <MoneyField label="Valor mensual" value={amount} onChange={setAmount} />
-        <Text style={styles.inputLabel}>Día de pago</Text>
+        <Text style={styles.inputLabel}>Cuándo lo vas a pagar</Text>
+        <View style={styles.chips}>{[['payday', 'Día del sueldo'], ['nextday', 'Día siguiente'], ['other', 'Otra fecha']].map(([id, label]) => <Pressable key={id} onPress={() => setPaymentTiming(id)} style={[styles.chip, paymentTiming === id && styles.chipOn]}><Text style={[styles.chipText, paymentTiming === id && styles.chipTextOn]}>{label}</Text></Pressable>)}</View>
+        {paymentTiming === 'other' && <>
+        <Text style={styles.inputLabel}>Día del mes siguiente al sueldo</Text>
         <TextInput
           value={dueDay}
           onChangeText={(v) => setDueDay(v.replace(/\D/g, '').slice(0, 2))}
@@ -952,6 +1022,9 @@ function AppContent() {
           maxLength={2}
           style={styles.textInput}
         />
+        </>}
+        <Text style={styles.inputLabel}>Día límite de la factura (opcional, mes siguiente)</Text>
+        <TextInput value={deadlineDay} onChangeText={(v) => setDeadlineDay(v.replace(/\D/g, '').slice(0, 2))} placeholder="Ej. 10 · distinto del día que planeas pagar" placeholderTextColor={COLORS.muted} keyboardType="number-pad" style={styles.textInput} />
         <Text style={styles.inputLabel}>Cuotas totales (opcional)</Text>
         <TextInput
           value={installmentsTotal}
@@ -1016,6 +1089,19 @@ function AppContent() {
       </Sheet>
       <Sheet visible={sheet === 'payFixed'} onClose={closeSheet} title={selectedFixed?.name || 'Detalle del gasto'}>
         {selectedFixed && <>
+          <View style={styles.detailHeading}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.fixedHint, { color: paymentStatus(selectedFixed).color }]}>{shortDate(fixedDate(selectedFixed))} · {paymentStatus(selectedFixed).text}</Text>
+              {!!selectedFixed.deadlineDay && <Text style={styles.fixedHint}>Factura vence: {shortDate(planPaymentDate(cycle.start, { dueDay: selectedFixed.deadlineDay }))}</Text>}
+              <Text style={styles.fixedHint}>{money(fixedPaidAmount(selectedFixed))} pagados</Text>
+            </View>
+            <Pressable accessibilityLabel="Opciones del gasto" style={styles.detailMenuButton} onPress={() => setExpenseMenu((open) => !open)}><Icon name="options" size={24} color={COLORS.muted} /></Pressable>
+          </View>
+          {expenseMenu && <View style={styles.detailPanel}>
+            <Pressable style={styles.editButton} onPress={openFixedEditor}><Icon name="edit" size={18} color={COLORS.mint} /><Text style={styles.editButtonText}>Editar gasto</Text></Pressable>
+            {selectedFixed.active !== false && <Pressable style={styles.editButton} onPress={removeFromMonth}><Text style={styles.editButtonText}>Quitar de este mes</Text></Pressable>}
+            <Pressable style={styles.deleteButton} onPress={deleteFixed}><Icon name="trash" size={18} color={COLORS.danger} /><Text style={styles.deleteButtonText}>Eliminar definitivamente</Text></Pressable>
+          </View>}
           {selectedFixed.active === false && (
             <View style={styles.activationRow}>
               <Pressable onPress={() => toggleFixedActive(selectedFixed, true)}><Text style={styles.editButtonText}>Agregar a {budgetMonth}</Text></Pressable>
@@ -1025,10 +1111,20 @@ function AppContent() {
             <Stat label="Valor total" value={money(selectedFixed.amount)} />
             <Stat label="Pendiente" value={money(Math.max(0, selectedFixed.amount - fixedPaidAmount(selectedFixed)))} />
           </View>
-          {selectedFixed.active !== false && fixedPaidAmount(selectedFixed) < selectedFixed.amount && <>
-            <MoneyField label="¿Cuánto pagaste?" value={amount} onChange={setAmount} />
-            <Text style={styles.sheetNote}>Puedes registrar varios abonos hasta completar el gasto. El saldo seguirá visible como pendiente.</Text>
-          </>}
+          {selectedFixed.active !== false && <View style={styles.detailPanel}>
+            <Text style={styles.detailSectionLabel}>PAGO</Text>
+            {!paymentAction ? <>
+              {fixedPaidAmount(selectedFixed) < selectedFixed.amount && <Pressable style={styles.primaryButton} onPress={() => { setAmount(''); setPaymentAction('add'); }}><Text style={styles.primaryText}>Registrar pago</Text></Pressable>}
+              {fixedPaidAmount(selectedFixed) > 0 && <Pressable style={fixedPaidAmount(selectedFixed) >= selectedFixed.amount ? styles.primaryButton : styles.editButton} onPress={() => { setAmount(formatMoneyInput(fixedPaidAmount(selectedFixed))); setPaymentAction('correct'); }}><Text style={fixedPaidAmount(selectedFixed) >= selectedFixed.amount ? styles.primaryText : styles.editButtonText}>Corregir pago</Text></Pressable>}
+            </> : <>
+              <MoneyField label={paymentAction === 'correct' ? 'Total pagado acumulado' : 'Monto de este pago'} value={amount} onChange={setAmount} />
+              <Text style={styles.sheetNote}>{paymentAction === 'correct' ? 'Reemplaza el total registrado. Escribe 0 para volver a pendiente; las cuotas se ajustarán automáticamente.' : 'Este monto se sumará a tus abonos anteriores.'}</Text>
+              {paymentAction === 'add' && <Pressable style={styles.editButton} onPress={() => setAmount(formatMoneyInput(selectedFixed.amount - fixedPaidAmount(selectedFixed)))}><Text style={styles.editButtonText}>Pagar restante: {money(selectedFixed.amount - fixedPaidAmount(selectedFixed))}</Text></Pressable>}
+              <Pressable style={styles.primaryButton} onPress={paymentAction === 'correct' ? correctFixedPayment : addFixedPayment}><Text style={styles.primaryText}>{paymentAction === 'correct' ? 'Guardar corrección' : 'Guardar pago'}</Text></Pressable>
+              <Pressable style={styles.editButton} onPress={() => { setPaymentAction(null); setAmount(''); }}><Text style={styles.editButtonText}>Cancelar</Text></Pressable>
+            </>}
+          </View>}
+          {(!!selectedFixed.paymentReference || !!selectedFixed.paymentUrl) && <Text style={styles.detailSectionLabel}>DATOS PARA PAGAR</Text>}
           {!!selectedFixed.paymentReference && (
             <View style={styles.referenceCard}>
               <View style={{ flex: 1 }}>
@@ -1042,24 +1138,11 @@ function AppContent() {
             </View>
           )}
           {!!selectedFixed.paymentUrl && (
-            <Pressable style={styles.payLinkButton} onPress={() => openPaymentUrl(selectedFixed.paymentUrl)}>
-              <Icon name="external-link" size={19} color={COLORS.bg} />
-              <Text style={styles.primaryText}>Ir a pagar</Text>
+            <Pressable style={styles.editButton} onPress={() => openPaymentUrl(selectedFixed.paymentUrl)}>
+              <Icon name="external-link" size={19} color={COLORS.mint} />
+              <Text style={styles.editButtonText}>Abrir enlace de pago</Text>
             </Pressable>
           )}
-          <Pressable style={styles.editButton} onPress={openFixedEditor}>
-            <Icon name="edit" size={18} color={COLORS.mint} />
-            <Text style={styles.editButtonText}>Editar gasto fijo</Text>
-          </Pressable>
-          {selectedFixed.active !== false && fixedPaidAmount(selectedFixed) < selectedFixed.amount && <>
-            <Pressable style={styles.primaryButton} onPress={addFixedPayment}><Text style={styles.primaryText}>Guardar abono</Text></Pressable>
-            <Pressable style={styles.editButton} onPress={markFixedPaid}><Icon name="checkmark" size={18} color={COLORS.mint} /><Text style={styles.editButtonText}>Marcar como pagado</Text></Pressable>
-          </>}
-          {selectedFixed.active !== false && <Pressable style={styles.editButton} onPress={removeFromMonth}><Text style={styles.editButtonText}>Quitar de este mes</Text></Pressable>}
-          <Pressable style={styles.deleteButton} onPress={deleteFixed}>
-            <Icon name="trash" size={18} color={COLORS.danger} />
-            <Text style={styles.deleteButtonText}>Eliminar gasto fijo</Text>
-          </Pressable>
         </>}
       </Sheet>
       <Sheet visible={sheet === 'theme'} onClose={closeSheet} title="Elige tus colores">
@@ -1089,8 +1172,10 @@ function AppContent() {
         </Pressable>
       </Modal>
       <Sheet visible={sheet === 'salary'} onClose={closeSheet} title="Tu sueldo">
+        <Text style={styles.inputLabel}>Día en que recibes el sueldo</Text>
+        <View style={styles.chips}>{[30, 31].map((day) => <Pressable key={day} onPress={() => setDueDay(String(day))} style={[styles.chip, (Number(dueDay) || data.payDay) === day && styles.chipOn]}><Text style={[styles.chipText, (Number(dueDay) || data.payDay) === day && styles.chipTextOn]}>Día {day}</Text></Pressable>)}</View>
         <MoneyField label="¿Cuánto recibes cada período?" value={amount} onChange={setAmount} />
-        <Text style={styles.sheetNote}>Este pago financiará {budgetMonth}. El período va del {shortDate(cycle.start)} al {shortDate(cycle.end)}. Si un mes no tiene día 31, se usa el último día disponible.</Text>
+        <Text style={styles.sheetNote}>Prepara los pagos del sueldo de {budgetMonth}. Puedes pagar al cobrar, al día siguiente o en otra fecha. En meses cortos se usa el último día disponible.</Text>
         <Pressable style={styles.primaryButton} onPress={saveSetup}><Text style={styles.primaryText}>Guardar sueldo</Text></Pressable>
       </Sheet>
       <Sheet visible={sheet === 'goal'} onClose={closeSheet} title="Meta de ahorro">
@@ -1185,6 +1270,10 @@ function createStyles(colors) {
   reminderNote: { flexDirection: 'row', gap: 10, padding: 13, borderRadius: 13, backgroundColor: '#F4C96B10', marginBottom: 18 },
   reminderText: { flex: 1, color: COLORS.muted, fontSize: 11, lineHeight: 17 },
   planHero: { borderRadius: 22, padding: 20, backgroundColor: COLORS.card },
+  detailHeading: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  detailMenuButton: { padding: 12, borderRadius: 12, backgroundColor: COLORS.card2 },
+  detailPanel: { padding: 16, borderRadius: 18, backgroundColor: COLORS.card2, marginBottom: 18 },
+  detailSectionLabel: { color: COLORS.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginBottom: 14 },
   overviewTile: { flex: 1, padding: 16, borderRadius: 18, backgroundColor: COLORS.card, gap: 8 },
   overviewAmount: { color: COLORS.text, fontSize: 19, fontWeight: '800' },
   compactPayment: { flexDirection: 'row', alignItems: 'center', minHeight: 72, paddingVertical: 12, gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: COLORS.line },
