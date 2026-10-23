@@ -1,36 +1,5 @@
 {
-  "expo": {
-    "name": "Finanzas Personales",
-    "slug": "flujo-finanzas",
-    "version": "1.21.1",
-    "orientation": "portrait",
-    "icon": "./assets/finanzas-icon-v2.png",
-    "userInterfaceStyle": "dark",
-    "splash": {
-      "image": "./assets/finanzas-icon-v2.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#07111F"
-    },
-    "android": {
-      "package": "com.personal.flujofinanzas",
-      "versionCode": 26,
-      "softwareKeyboardLayoutMode": "resize",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/finanzas-icon-v2.png",
-        "backgroundColor": "#07111F"
-      },
-      "permissions": ["USE_BIOMETRIC", "USE_FINGERPRINT"]
-    },
-    "plugins": [
-      "expo-local-authentication",
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/finanzas-icon-v2.png",
-          "color": "#82F2BC",
-          "defaultChannel": "pagos"
-        }
-      ]
-    ]
-  }
+  "name": "main",
+  "displayName": "Finanzas Personales",
+  "version": "1.27.2"
 }

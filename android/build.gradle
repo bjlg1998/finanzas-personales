@@ -1,14 +1,37 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
+  ext {
+    buildToolsVersion = "35.0.0"
+    minSdkVersion = 24
+    compileSdkVersion = 35
+    targetSdkVersion = 35
+    ndkVersion = "27.1.12297006"
+    kotlinVersion = "2.4.21"
+  }
   repositories {
     google()
     mavenCentral()
   }
   dependencies {
-    classpath('com.android.tools.build:gradle')
+    classpath('com.android.tools.build:gradle:8.13.2')
+    // Android's Kotlin compatibility table requires R8/D8 >=9.1.29 for Kotlin 2.4.
+    // Keep AGP 8's APIs used by React Native, without migrating the app to AGP 9.
+    classpath('com.android.tools:r8:9.1.55')
     classpath('com.facebook.react:react-native-gradle-plugin')
-    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')
+    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21')
+    // AGP still requests vulnerable transitive releases. Keep Netty's modules
+    // aligned within 4.1 and Bouncy Castle's provider/PKIX/util on the same release.
+    classpath(platform('io.netty:netty-bom:4.1.139.Final'))
+    constraints {
+      classpath('org.bouncycastle:bcpkix-jdk18on:1.85') { because 'Patched PKIX; verified with the provider and APK signer' }
+      classpath('org.bouncycastle:bcprov-jdk18on:1.85') { because 'Patched provider, aligned with PKIX' }
+      classpath('org.bouncycastle:bcutil-jdk18on:1.85') { because 'Keep Bouncy Castle modules aligned' }
+      classpath('org.apache.commons:commons-compress:1.26.2') { because 'Fix malformed archive denial of service' }
+      classpath('org.apache.commons:commons-lang3:3.18.0') { because 'Patch recursion denial of service in the archive dependency tree' }
+      classpath('org.bitbucket.b_c:jose4j:0.9.6') { because 'Fix compressed JWE denial of service' }
+      classpath('org.jdom:jdom2:2.0.6.1') { because 'Fix XML external entity advisory' }
+    }
   }
 }
 
@@ -29,9 +52,8 @@ allprojects {
 
     google()
     mavenCentral()
-    maven { url 'https://www.jitpack.io' }
   }
 }
 
-apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"
+apply from: 'tooling-check.gradle'

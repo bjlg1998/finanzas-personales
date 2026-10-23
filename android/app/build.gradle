@@ -9,16 +9,14 @@ def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
  * By default you don't need to apply any configuration, just uncomment the lines you need.
  */
 react {
-    entryFile = file(["node", "-e", "require('expo/scripts/resolveAppEntry')", projectRoot, "android", "absolute"].execute(null, rootDir).text.trim())
+    entryFile = file("$projectRoot/index.js")
     reactNativeDir = new File(["node", "--print", "require.resolve('react-native/package.json')"].execute(null, rootDir).text.trim()).getParentFile().getAbsoluteFile()
     hermesCommand = new File(["node", "--print", "require.resolve('react-native/package.json')"].execute(null, rootDir).text.trim()).getParentFile().getAbsolutePath() + "/sdks/hermesc/%OS-BIN%/hermesc"
     codegenDir = new File(["node", "--print", "require.resolve('@react-native/codegen/package.json', { paths: [require.resolve('react-native/package.json')] })"].execute(null, rootDir).text.trim()).getParentFile().getAbsoluteFile()
 
     enableBundleCompression = (findProperty('android.enableBundleCompression') ?: false).toBoolean()
-    // Use Expo CLI to bundle the app, this ensures the Metro config
-    // works correctly with Expo projects.
-    cliFile = new File(["node", "--print", "require.resolve('@expo/cli', { paths: [require.resolve('expo/package.json')] })"].execute(null, rootDir).text.trim())
-    bundleCommand = "export:embed"
+    cliFile = file("$projectRoot/scripts/native-cli.cjs")
+    bundleCommand = "bundle"
 
     /* Folders */
      //   The root of your project, i.e. where "package.json" lives. Default is '../..'
@@ -81,6 +79,21 @@ def enableProguardInReleaseBuilds = (findProperty('android.enableProguardInRelea
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+// Existing installations must keep their signer until a separately validated key migration.
+def financeSigningMode = findProperty('financeSigningMode') ?: 'compatibility'
+if (!(financeSigningMode in ['compatibility', 'production'])) {
+    throw new GradleException('financeSigningMode must be compatibility or production')
+}
+def productionSigning = financeSigningMode == 'production'
+def signingEnvironment = ['FINANCE_KEYSTORE_PATH', 'FINANCE_KEYSTORE_PASSWORD', 'FINANCE_KEY_ALIAS', 'FINANCE_KEY_PASSWORD']
+if (productionSigning && signingEnvironment.any { !System.getenv(it) }) {
+    throw new GradleException('Production signing requires FINANCE_KEYSTORE_PATH, FINANCE_KEYSTORE_PASSWORD, FINANCE_KEY_ALIAS and FINANCE_KEY_PASSWORD. See docs/SIGNING.md.')
+}
+if (productionSigning && !file(System.getenv('FINANCE_KEYSTORE_PATH')).isFile()) {
+    throw new GradleException('The production keystore file does not exist.')
+}
+if (!productionSigning) logger.warn('COMPATIBILITY SIGNING: keeping the existing certificate for installed APK updates. This is not a production key migration.')
+
 android {
     ndkVersion rootProject.ext.ndkVersion
 
@@ -92,8 +105,8 @@ android {
         applicationId 'com.personal.flujofinanzas'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 26
-        versionName "1.21.1"
+        versionCode 35
+        versionName "1.27.2"
     }
     signingConfigs {
         debug {
@@ -102,15 +115,22 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (productionSigning) {
+            production {
+                storeFile file(System.getenv('FINANCE_KEYSTORE_PATH'))
+                storePassword System.getenv('FINANCE_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('FINANCE_KEY_ALIAS')
+                keyPassword System.getenv('FINANCE_KEY_PASSWORD')
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // No silent fallback when production signing is explicitly requested.
+            signingConfig productionSigning ? signingConfigs.production : signingConfigs.debug
             shrinkResources (findProperty('android.enableShrinkResourcesInReleaseBuilds')?.toBoolean() ?: false)
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
@@ -119,8 +139,11 @@ android {
     }
     packagingOptions {
         jniLibs {
-            useLegacyPackaging (findProperty('expo.useLegacyPackaging')?.toBoolean() ?: false)
+            useLegacyPackaging false
         }
+    }
+    testOptions {
+        unitTests.includeAndroidResources = true
     }
     androidResources {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
@@ -151,27 +174,43 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
-    def isGifEnabled = (findProperty('expo.gif.enabled') ?: "") == "true";
-    def isWebpEnabled = (findProperty('expo.webp.enabled') ?: "") == "true";
-    def isWebpAnimatedEnabled = (findProperty('expo.webp.animated') ?: "") == "true";
-
-    if (isGifEnabled) {
-        // For animated gif support
-        implementation("com.facebook.fresco:animated-gif:${expoLibs.versions.fresco.get()}")
-    }
-
-    if (isWebpEnabled) {
-        // For webp support
-        implementation("com.facebook.fresco:webpsupport:${expoLibs.versions.fresco.get()}")
-        if (isWebpAnimatedEnabled) {
-            // Animated webp support
-            implementation("com.facebook.fresco:animated-webp:${expoLibs.versions.fresco.get()}")
-        }
-    }
+    implementation("androidx.biometric:biometric:1.1.0")
+    // OkHttp from React Native otherwise selects Okio 2.9 (CVE-2023-3635).
+    // Okio 3 preserves its JVM API; the compatibility test below exercises that path.
+    implementation("com.squareup.okio:okio:3.4.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    // Patched test-only provider; never added to the release APK or Gradle tooling.
+    testImplementation("org.bouncycastle:bcprov-jdk18on:1.85")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {
         implementation jscFlavor
+    }
+}
+
+// Export what Gradle actually resolves, not only the direct declarations.
+tasks.register('writeNativeDependencyInventory') {
+    def inventory = layout.buildDirectory.file('reports/dependencies/native-inventory.json')
+    outputs.file(inventory)
+    outputs.upToDateWhen { false }
+    doLast {
+        def scopes = [release: configurations.releaseRuntimeClasspath,
+                      tests: configurations.releaseUnitTestRuntimeClasspath,
+                      tooling: rootProject.buildscript.configurations.classpath]
+        def components = scopes.collectMany { scope, configuration ->
+            configuration.incoming.resolutionResult.allComponents.collect { component ->
+                def id = component.id
+                if (!(id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier)) return null
+                [scope: scope, name: "${id.group}:${id.module}".toString(), version: id.version]
+            }.findAll { it != null }
+        }.unique().sort { "${it.scope}:${it.name}" }
+        def output = inventory.get().asFile
+        output.parentFile.mkdirs()
+        output.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+            schemaVersion: 1, components: components
+        ])) + '\n'
+        println("Native dependency inventory: ${output} (${components.size()} resolved components)")
     }
 }

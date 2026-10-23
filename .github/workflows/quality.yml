@@ -1,0 +1,50 @@
+name: Quality
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+      - run: npm run audit:deps
+  android:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+      - run: npm ci --include=dev
+      # Disposable CI signer only. Never export/install/publish this APK as an update.
+      - name: Generate disposable CI certificate (not the installed app certificate)
+        run: keytool -genkeypair -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 2 -dname "CN=Disposable CI"
+      - name: Android tests, lint, dependency inventory and release packaging (no emulator)
+        working-directory: android
+        run: bash gradlew verifyToolingCompatibility :app:testReleaseUnitTest :app:lintRelease :app:writeNativeDependencyInventory :app:assembleRelease --console=plain
+      - name: Audit Maven dependencies including build tools
+        run: npm run audit:native
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-quality-reports
+          path: |
+            android/app/build/reports/
+            android/app/build/test-results/
+            reports/native-audit.json
+          retention-days: 7

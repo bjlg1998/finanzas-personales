@@ -12,3 +12,6 @@ android/.kotlin/
 
 # Los instaladores se publican en GitHub Releases, no en el historial del código.
 *.apk
+
+# Local measurements may contain device metadata; never include them in Git.
+reports/

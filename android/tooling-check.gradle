@@ -1,0 +1,80 @@
+// Compatibility smoke checks run against the REAL resolved buildscript classes.
+// No dependency stubs, exclusions, financial data, emulator, or external servers.
+buildscript {
+    dependencies {
+        // Applied Gradle scripts have their own compile classpath. Reuse the
+        // exact resolved files of AGP's classpath, not a separate test dependency tree.
+        classpath files(rootProject.buildscript.configurations.classpath)
+    }
+}
+tasks.register('verifyToolingCompatibility') {
+    doLast {
+        assert com.android.tools.r8.Version.getVersionString().startsWith('9.1.55')
+        def versions = io.netty.util.Version.identify()
+        assert !versions.isEmpty()
+        assert versions.values().every { it.artifactVersion() == '4.1.139.Final' }
+        def codec = new io.netty.channel.embedded.EmbeddedChannel(new io.netty.handler.codec.http.HttpServerCodec())
+        try {
+            codec.writeInbound(io.netty.buffer.Unpooled.copiedBuffer('GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n', java.nio.charset.StandardCharsets.US_ASCII))
+            def request = codec.readInbound()
+            assert request.method().name() == 'GET'
+            assert request.uri() == '/health'
+            io.netty.util.ReferenceCountUtil.release(request)
+        } finally { codec.finishAndReleaseAll() }
+
+        // AGP uses gRPC with Netty. Exercise an actual loopback connection.
+        def server = io.grpc.netty.NettyServerBuilder.forAddress(new java.net.InetSocketAddress(java.net.InetAddress.loopbackAddress, 0)).build().start()
+        def channel = io.grpc.netty.NettyChannelBuilder.forAddress(server.listenSockets[0]).usePlaintext().build()
+        try {
+            channel.getState(true)
+            def deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while (channel.getState(false) != io.grpc.ConnectivityState.READY && System.nanoTime() < deadline) Thread.sleep(20)
+            assert channel.getState(false) == io.grpc.ConnectivityState.READY
+        } finally {
+            channel.shutdownNow().awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+            server.shutdownNow().awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+
+        def provider = new org.bouncycastle.jce.provider.BouncyCastleProvider()
+        assert provider.getVersionStr() == '1.85'
+        def generator = java.security.KeyPairGenerator.getInstance('RSA', provider)
+        generator.initialize(2048)
+        def keys = generator.generateKeyPair()
+        def signer = java.security.Signature.getInstance('SHA256withRSA', provider)
+        signer.initSign(keys.private)
+        signer.update('tooling-check'.bytes)
+        def signature = signer.sign()
+        signer.initVerify(keys.public)
+        signer.update('tooling-check'.bytes)
+        assert signer.verify(signature)
+        def subject = new org.bouncycastle.asn1.x500.X500Name('CN=Temporary compatibility test')
+        def certificate = new org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(subject, java.math.BigInteger.ONE,
+            new Date(0), new Date(4102444800000L), subject, keys.public)
+            .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder('SHA256withRSA').setProvider(provider).build(keys.private))
+        assert certificate.isSignatureValid(new org.bouncycastle.operator.jcajce.JcaContentVerifierProviderBuilder().setProvider(provider).build(keys.public))
+
+        def jws = new org.jose4j.jws.JsonWebSignature()
+        jws.setAlgorithmHeaderValue(org.jose4j.jws.AlgorithmIdentifiers.HMAC_SHA256)
+        jws.setKey(new org.jose4j.keys.HmacKey('only-a-test-key-32-bytes-long-1234'.bytes))
+        jws.setPayload('tooling-check')
+        def reader = new org.jose4j.jws.JsonWebSignature()
+        reader.setCompactSerialization(jws.getCompactSerialization())
+        reader.setKey(new org.jose4j.keys.HmacKey('only-a-test-key-32-bytes-long-1234'.bytes))
+        assert reader.verifySignature()
+
+        assert new org.jdom2.input.SAXBuilder().build(new StringReader('<plan/>')).rootElement.name == 'plan'
+        assert org.apache.commons.lang3.ClassUtils.class.package.implementationVersion == '3.18.0'
+        assert org.apache.commons.lang3.ClassUtils.getClass('java.lang.String') == String
+        def bytes = new ByteArrayOutputStream()
+        new org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream(bytes).withCloseable { zip ->
+            zip.putArchiveEntry(new org.apache.commons.compress.archivers.zip.ZipArchiveEntry('check.txt'))
+            zip.write('tooling-check'.bytes)
+            zip.closeArchiveEntry()
+        }
+        new org.apache.commons.compress.archivers.zip.ZipArchiveInputStream(new ByteArrayInputStream(bytes.toByteArray())).withCloseable { zip ->
+            assert zip.nextEntry.name == 'check.txt'
+            assert new String(zip.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8) == 'tooling-check'
+        }
+        println('Tooling compatibility OK: aligned Netty HTTP + gRPC, Bouncy Castle signing + PKIX, jose4j JWS, JDOM and ZIP round trip.')
+    }
+}
