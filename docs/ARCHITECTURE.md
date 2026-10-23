@@ -52,6 +52,16 @@ No se certifica cumplimiento absoluto de SOLID ni calidad de producción únicam
 
 ## Reglas que deben conservarse
 
+### Simulación de próximos sueldos (1.28.0)
+
+`SalarySimulatorScreen` se abre desde Ajustes como una pantalla modal independiente, con regreso a Ajustes. `useSalarySimulation` coordina carga, validación, guardado ordenado y reintento. `simulationRepository` recibe su almacenamiento por inyección y usa exclusivamente `@flujo/simulations/v1`; no escribe en el registro financiero ni programa notificaciones.
+
+El dominio `simulation.js`, tipado mediante JSDoc estricto, calcula fechas de sueldo, saldos y distribución explícita de cuotas. Cada mes identifica el **sueldo**, aunque el pago se realice el mes siguiente. Los escenarios nuevos parten del sueldo configurado y solo del ingreso extra recurrente, sin arrastrar sobrantes ni gastos actuales. Ningún gasto se incluye automáticamente. Cada selección representa una cuota; la distribución voluntaria se limita a las cuotas realmente pendientes en todos los escenarios guardados. Los montos seleccionados son instantáneas editables, no referencias mutables al gasto real.
+
+Si un pago real posterior reduce las cuotas pendientes, se advierte de una sobreasignación sin eliminar escenarios silenciosamente. Las pruebas cubren cuotas, fechas cortas, cambio de año, recurrencia explícita, saldos negativos, aislamiento y recuperación de errores de almacenamiento. El guardado local no convierte la simulación en un plan ni la marca como pagada.
+
+### Plan real
+
 - Un abono solo modifica el pago acumulado del plan actual.
 - El total pagado no puede ser negativo ni superar el valor del gasto.
 - Completar un pago avanza como máximo una cuota por plan. Corregirlo revierte únicamente ese avance.

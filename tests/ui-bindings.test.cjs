@@ -13,7 +13,9 @@ function harness(theme = 'menta', initial = {}, dimensions = {}) {
   const data = migrateFinanceData({ salary: 1000000, goal: 100000, fixed: [{ id: 'light', name: 'Luz', amount: 150000, paidAmount: 60000, category: 'Servicios', paymentTiming: 'payday' }], expenses: [], periods: [], activeCycleStart: new Date(2026, 9, 31).toISOString(), theme, ...initial });
   const cache = new Map();
   const layoutEffects = [];
-  const fakeReact = { ...React, useLayoutEffect: (fn,deps) => layoutEffects.push({fn,deps}), useSyncExternalStore: (_, snapshot) => snapshot(), useState: (value) => [typeof value === 'function' ? value() : value, () => {}], useRef: (current) => ({ current }), useMemo: (fn) => fn(), useCallback: (fn) => fn, useEffect: () => {} };
+  const simulated = { data: {version:1,scenarios:[]} };
+  const stateValues = [];
+  const fakeReact = { ...React, useLayoutEffect: (fn,deps) => layoutEffects.push({fn,deps}), useSyncExternalStore: (_, snapshot) => snapshot(), useState: (value) => [stateValues.length ? stateValues.shift() : typeof value === 'function' ? value() : value, () => {}], useRef: (current) => ({ current }), useMemo: (fn) => fn(), useCallback: (fn) => fn, useEffect: () => {} };
   const native = new Proxy({ StyleSheet: { create: (value) => value, hairlineWidth: 1, absoluteFillObject: {} }, Animated: { Value: class { interpolate() { return 0; } }, View: 'AnimatedView' }, useWindowDimensions: () => ({ width: 400, height: 900, fontScale:1, ...dimensions }), Alert: { alert() {} } }, { get: (value, key) => key in value ? value[key] : String(key) });
   function load(file) {
     const absolute = path.resolve(root, file.endsWith('.js') ? file : file + '.js');
@@ -28,6 +30,7 @@ function harness(theme = 'menta', initial = {}, dimensions = {}) {
       if (name === 'lucide-react-native') return new Proxy({}, { get: () => 'Glyph' });
       if (name.includes('FinanceProvider')) return { useFinanceData: () => ({ data, setData() {}, loaded: true, loadError: null, reload() {} }) };
       if (name.includes('usePaymentNotifications')) return { usePaymentNotifications() {} };
+      if (name.includes('useSalarySimulation')) return { useSalarySimulation: () => ({simulation:simulated.data, status:'saved', error:'', retry(){}, change:update => {simulated.data=update(simulated.data);}}) };
       if (name.includes('services/notifications')) return { requestPaymentNotifications: async () => true };
       if (name.includes('services/biometrics')) return { authenticate: async () => ({ success: true }), canUseBiometrics: async () => true };
       if (name === 'expo-clipboard') return { setStringAsync: async () => {} };
@@ -44,7 +47,7 @@ function harness(theme = 'menta', initial = {}, dimensions = {}) {
     new Function('require', 'module', 'exports', code)(mockedRequire, module, module.exports);
     return module.exports;
   }
-  return { load, data, layoutEffects, model: load('src/state/useFinanceController').useFinanceController() };
+  return { load, data, layoutEffects, simulated, stateValues, model: load('src/state/useFinanceController').useFinanceController() };
 }
 
 test('all extracted screens and modal forms build valid React elements', () => {
@@ -213,4 +216,57 @@ test('variable expenses remain accessible for editing and deletion from the plan
   const row=children.find(child=>child.props.onLongPress);
   row.props.onPress();row.props.onLongPress();
   assert.equal(edited,item);assert.equal(removed,item.id);
+});
+
+test('simulator UI selects expenses and adjusts income without changing actual finance data',()=>{
+  const {load,model,data,simulated}=harness('oceano',{fixed:[{id:'addi',name:'Addi amor',amount:60000,installmentsTotal:2,installmentsPaid:0,category:'Deudas'}]});
+  const original=JSON.stringify(data);
+  let closed=0;
+  const render=()=>load('src/screens/SalarySimulatorScreen').default({...model,onClose:()=>closed++});
+  function nodes(node, predicate, found=[]) {
+    if(Array.isArray(node)) {node.forEach(value=>nodes(value,predicate,found));return found;}
+    if(!React.isValidElement(node))return found;
+    if(predicate(node))found.push(node);
+    nodes(node.props.children,predicate,found);return found;
+  }
+  let tree=render();
+  assert.equal(tree.props.onRequestClose instanceof Function,true);
+  const checkbox=nodes(tree,node=>node.props.accessibilityRole==='checkbox')[0];
+  assert.equal(checkbox.props.accessibilityState.checked,false);
+  checkbox.props.onPress();
+  assert.equal(simulated.data.scenarios[0].month,'2026-11');
+  assert.equal(simulated.data.scenarios[0].payments[0].sourceId,'addi');
+  tree=render();
+  nodes(tree,node=>node.props.label==='Sueldo estimado')[0].props.onChange('1.200.000');
+  assert.equal(simulated.data.scenarios[0].salary,1200000);
+  assert.equal(JSON.stringify(data),original);
+  render().props.onRequestClose();
+  assert.equal(closed,1);
+});
+
+test('saved simulation rows stay in the catalog and support amount editing without touching actual expenses',()=>{
+  const expense={id:'addi',name:'Addi amor',amount:60000,installmentsTotal:1,installmentsPaid:0,category:'Deudas'};
+  const {load,model,data,simulated,stateValues}=harness('menta',{fixed:[expense]});
+  const original=JSON.stringify(data);
+  const render=()=>load('src/screens/SalarySimulatorScreen').default({...model,onClose(){}});
+  function find(node,predicate,result=[]) {
+    if(Array.isArray(node)){node.forEach(child=>find(child,predicate,result));return result;}
+    if(!React.isValidElement(node))return result;
+    if(predicate(node))result.push(node);
+    find(node.props.children,predicate,result);return result;
+  }
+  const before=render();
+  const buttonsBefore=find(before,node=>node.props.accessibilityRole==='button').length;
+  find(before,node=>node.props.accessibilityRole==='checkbox')[0].props.onPress();
+  const selected=render();
+  assert.equal(find(selected,node=>node.props.accessibilityRole==='button').length,buttonsBefore);
+  assert.equal(find(selected,node=>node.type?.name==='ScenarioPayment').length,0);
+  assert.equal(find(selected,node=>node.props.accessibilityLabel==='Ajustar monto simulado de Addi amor').length,1);
+  assert.deepEqual(find(selected,node=>node.type==='ScrollView')[0].props.maintainVisibleContentPosition,{minIndexForVisible:0});
+  stateValues.push(1,0,'',false,'','','',false,expense,'75.000');
+  const editor=render();
+  const apply=find(editor,node=>node.props.children?.props?.children==='Aplicar a este sueldo')[0];
+  apply.props.onPress();
+  assert.equal(simulated.data.scenarios[0].payments[0].amount,75000);
+  assert.equal(JSON.stringify(data),original);
 });

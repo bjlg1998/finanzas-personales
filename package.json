@@ -1,6 +1,6 @@
 {
   "name": "flujo-finanzas",
-  "version": "1.27.2",
+  "version": "1.28.1",
   "main": "index.js",
   "engines": { "node": "^22.13.0 || ^24.3.0 || >=26.0.0" },
   "scripts": {

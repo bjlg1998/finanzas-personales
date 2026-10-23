@@ -4,6 +4,23 @@ Historial de cambios; este archivo no participa en la compilación. Las mejoras 
 
 ## Sin publicar
 
+## 1.28.1 — 2026-10-23
+
+- Publicación autorizada por el propietario; incluye el simulador y sus ajustes locales 1.28.0.
+
+- Edición del monto desde cada gasto guardado mediante un panel independiente, limitada al sueldo simulado.
+- Lista estable: los gastos seleccionados ya no se duplican encima del catálogo ni desaparecen los botones al agotar cuotas; conservación del contenido visible al actualizar.
+- 72 pruebas JS aprobadas, incluida regresión de estabilidad de filas y edición independiente de montos.
+- Conserva gastos reales, firma y almacenamiento financiero. APK ARM64 de actualización; sin emulador.
+
+### Simulador de próximos sueldos (integrado desde 1.28.0)
+
+- Nueva pantalla en Ajustes para comparar tres sueldos y desplazarse a meses posteriores.
+- Selección manual de gastos guardados, distribución explícita de cuotas pendientes y pagos hipotéticos. No se presupone recurrencia mensual.
+- Montos e ingresos propios por sueldo, guardado local independiente y saldos estimados sin arrastrar sobrantes. No modifica el plan real, historial, pagos ni recordatorios.
+- 71 pruebas JS aprobadas, incluido aislamiento de datos, distribución de cuotas y conexión de la nueva interfaz; dominio con tipos estrictos. Lint Android conserva 0 errores y 5 advertencias previamente documentadas.
+- Conserva firma y paquete para actualizar sin desinstalar.
+
 ## 1.27.2 — 2026-10-23
 
 - APK validado en dispositivo por el propietario y publicación autorizada.

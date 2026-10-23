@@ -1,6 +1,7 @@
 import TabScrollView from '../components/TabScrollView';
 import { appNotice } from '../services/appNotice';
-import React from 'react';
+import React, { useState } from 'react';
+import SalarySimulatorScreen from './SalarySimulatorScreen';
 import { useTheme } from '../theme/ThemeProvider';
 import { Pressable, Switch, Text, View } from 'react-native';
 import { Header, Icon } from '../components/ui';
@@ -19,6 +20,7 @@ function SettingsScreen(props) {
     styles,
     colors: COLORS
   } = useTheme();
+  const [simulatorOpen, setSimulatorOpen] = useState(false);
   return <TabScrollView active={props.isActive} contentContainerStyle={styles.content}>
       <Header title="Ajustes" subtitle="TU ESPACIO PRIVADO" />
       <Pressable style={styles.settingRow} onPress={() => {
@@ -52,6 +54,13 @@ function SettingsScreen(props) {
       }} />
       </View>
       <PaymentNotificationSettings data={data} />
+      <Pressable style={styles.settingRow} onPress={() => setSimulatorOpen(true)} accessibilityRole="button">
+        <View style={styles.settingIcon}><Icon name="trending-up" size={22} color={COLORS.mint} /></View>
+        <View style={{
+        flex: 1
+      }}><Text style={styles.fixedName}>Simulador de próximos sueldos</Text><Text style={styles.fixedHint}>Proyecta pagos y cuotas sin cambiar tu plan</Text></View>
+        <Icon name="chevron-forward" color={COLORS.muted} size={20} />
+      </Pressable>
       <Pressable style={styles.settingRow} onPress={() => setSheet('theme')}>
         <View style={styles.settingIcon}><Icon name="sparkles" size={20} color={COLORS.mint} /></View>
         <View style={{
@@ -60,6 +69,7 @@ function SettingsScreen(props) {
         <Icon name="chevron-forward" color={COLORS.muted} size={20} />
       </Pressable>
       <View style={styles.privacy}><Icon name="shield-checkmark" size={20} color={COLORS.mint} /><Text style={styles.privacyText}>Tus datos viven en este teléfono. Finanzas Personales no necesita cuenta ni envía tu información financiera a internet.</Text></View>
+      {simulatorOpen && <SalarySimulatorScreen data={data} cycle={props.cycle} onClose={() => setSimulatorOpen(false)} />}
     </TabScrollView>;
 }
 export default React.memo(SettingsScreen);
